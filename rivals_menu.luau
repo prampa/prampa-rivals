@@ -493652,6 +493652,15 @@ do
             cached = okFile and exists == true
         end
 
+        -- a previous run may have cached a renamed .webm under this name;
+        -- re-read it and throw it away unless it really is audio
+        if cached and expectAudio and type(readfile) == 'function' then
+            local okRead, content = pcall(readfile, fileName)
+            if okRead and type(content) == 'string' and not looksLikeAudio(content) then
+                cached = false
+            end
+        end
+
         if not cached then
             local body = httpGet(url)
             if type(body) ~= 'string' or body == '' then
