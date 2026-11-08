@@ -494169,6 +494169,7 @@ do
         panel.BackgroundTransparency = 0.05
         panel.BorderSizePixel = 0
         panel.ClipsDescendants = true
+        panel.Active = true
         panel.Visible = false
         panel.ZIndex = 5
         panel.Parent = screenGui
