@@ -493528,11 +493528,9 @@ end
 
 -- >>> prampa addon (patched by patch_ue2.py) >>>
 -- Menu title, branded HUD, Discord presence (Lanyard), FPS / ping, song picker.
-print('[prampa] ADDON BLOCK STARTING - if you see this, the addon code is executing')
 do
     local BRAND = 'prampa'
     local ADDON_TITLE = 'Prampa Menu'
-    print('[prampa] Variables initialized: BRAND=' .. BRAND .. ', TITLE=' .. ADDON_TITLE)
     local DISCORD_ID = '1453886966599913708'
     local DISCORD_NAME_OVERRIDE = ''
     local ACCENT = Color3.fromRGB(124, 92, 255)
@@ -494494,9 +494492,7 @@ do
         search.TextChanged:Connect(applyFilter)
 
         -- wave animation ----------------------------------------------------
-        print('[' .. BRAND .. '] DEBUG: About to spawn wave animation loop')
         task.spawn(function()
-            print('[' .. BRAND .. '] DEBUG: Wave animation loop started')
             local phase = 0
 
             while screenGui.Parent do
@@ -494516,7 +494512,6 @@ do
                 task.wait(0.06)
             end
         end)
-        print('[' .. BRAND .. '] DEBUG: Wave animation task.spawn completed')
 
         -- presence --------------------------------------------------------
         local hasAvatar = false
@@ -494741,9 +494736,7 @@ do
 
         local startedAt = os.clock()
 
-        print('[' .. BRAND .. '] DEBUG: About to spawn presence loop')
         task.spawn(function()
-            print('[' .. BRAND .. '] DEBUG: Presence loop started')
             refreshPresence()
 
             while screenGui.Parent do
@@ -494752,9 +494745,7 @@ do
             end
         end)
 
-        print('[' .. BRAND .. '] DEBUG: About to spawn FPS/ping loop')
         task.spawn(function()
-            print('[' .. BRAND .. '] DEBUG: FPS/ping loop started')
             while screenGui.Parent do
                 local ping = readPing()
 
@@ -494773,17 +494764,13 @@ do
             end
         end)
 
-        print('[' .. BRAND .. '] DEBUG: About to spawn uptime/clock loop')
         task.spawn(function()
-            print('[' .. BRAND .. '] DEBUG: Uptime/clock loop started')
             while screenGui.Parent do
                 uptimeLabel.Text = formatUptime(os.clock() - startedAt)
                 clockLabel.Text = localClock()
                 task.wait(1)
             end
         end)
-
-        print('[' .. BRAND .. '] DEBUG: All task.spawn calls completed')
 
         if type(env.Library) == 'table'
             and typeof(env.Library.ScreenGui) == 'Instance' then
@@ -494834,7 +494821,6 @@ do
         end
 
         print('[' .. BRAND .. '] HUD ready - drag to move, click for the song picker.')
-        print('[' .. BRAND .. '] DEBUG: buildIsland() completed - island.Parent=' .. tostring(island.Parent) .. ', screenGui.Parent=' .. tostring(screenGui.Parent))
         if DISCORD_ID == '' then
             print('[' .. BRAND .. '] no Discord user ID set; presence disabled.')
         end
@@ -494932,34 +494918,24 @@ do
     -----------------------------------------------------------------------
 
     task.spawn(function()
-        print('[' .. BRAND .. '] DEBUG: Boot loop started, waiting for Library...')
         local waited = 0
 
         while waited < 300 do
-            if type(env.Library) == 'table' then
-                print('[' .. BRAND .. '] DEBUG: env.Library found, type=' .. type(env.Library))
-                if typeof(env.Library.ScreenGui) == 'Instance' then
-                    print('[' .. BRAND .. '] DEBUG: Library.ScreenGui found, starting HUD build...')
-                    watchTitle()
-                    prepareMusic()
-                    buildIsland()
-                    if SHOW_WATERMARK then
-                        buildWatermark()
-                    end
+            if type(env.Library) == 'table'
+                and typeof(env.Library.ScreenGui) == 'Instance' then
+                watchTitle()
+                prepareMusic()
+                buildIsland()
+                if SHOW_WATERMARK then
+                    buildWatermark()
+                end
 
-                    if #music.tracks > 0 then
-                        task.spawn(function()
-                            music.play(1)
-                        end)
-                    end
-                    return
-                else
-                    print('[' .. BRAND .. '] DEBUG: Library exists but ScreenGui is ' .. tostring(typeof(env.Library.ScreenGui)))
+                if #music.tracks > 0 then
+                    task.spawn(function()
+                        music.play(1)
+                    end)
                 end
-            else
-                if waited % 5 < 0.2 then
-                    print('[' .. BRAND .. '] DEBUG: Still waiting for Library... (' .. math.floor(waited) .. 's)')
-                end
+                return
             end
 
             task.wait(0.2)
@@ -494967,7 +494943,6 @@ do
         end
 
         warn('[' .. BRAND .. '] getgenv().Library never appeared; HUD not created.')
-        warn('[' .. BRAND .. '] DEBUG: Timeout after 300s. env.Library=' .. tostring(type(env.Library)))
     end)
 end
 -- <<< prampa addon <<<
