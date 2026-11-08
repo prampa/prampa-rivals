@@ -1,6 +1,0 @@
-song.ogg (Panik Atak by UZI) is missing.
-
-Add it manually or the first song won't load in-game.
-
-If you have the webm/mp3 file, convert it with:
-  ffmpeg -i panik_atak.webm -c:a libvorbis -q:a 5 song.ogg
