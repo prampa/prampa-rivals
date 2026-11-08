@@ -1,0 +1,25 @@
+# Source files (keep private)
+ue-v2-cracked.luau.txt
+ue-v2-modified.luau.txt
+
+# Original webm files (too large)
+songs/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+*.tmp
+*.log
