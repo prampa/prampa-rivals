@@ -493537,17 +493537,17 @@ do
     local SHOW_WATERMARK = true
     local MUSIC_BASE = 'https://raw.githubusercontent.com/prampa/prampa-rivals/main/'
     local MUSIC_TRACKS = {
-        { title = 'Song 1', file = 'song.ogg' },
-        { title = 'Song 2', file = 'song1.ogg' },
-        { title = 'Song 3', file = 'song2.ogg' },
-        { title = 'Song 4', file = 'song3.ogg' },
-        { title = 'Song 5', file = 'song4.ogg' },
-        { title = 'Song 6', file = 'song5.ogg' },
-        { title = 'Song 7', file = 'song6.ogg' },
-        { title = 'Song 8', file = 'song7.ogg' },
+        { title = 'Panik Atak', file = 'song.ogg' },
+        { title = 'Dönüyo Başım 2.0', file = 'song1.ogg' },
+        { title = 'El clasico', file = 'song2.ogg' },
+        { title = 'Fedakar', file = 'song3.ogg' },
+        { title = 'Gömün Beni Çukura', file = 'song4.ogg' },
+        { title = 'harbiden şekermiş', file = 'song5.ogg' },
+        { title = 'Hoşuna mı Gidiyor', file = 'song6.ogg' },
+        { title = 'Radyoda Neşet', file = 'song7.ogg' },
     }
     local MUSIC_VOLUME = 0.250
-    local BUILD_ID = 'c816e99d'
+    local BUILD_ID = '98c4c809'
     local POLL_SECONDS = 20
 
     local env = getgenv and getgenv() or _G
@@ -493919,6 +493919,12 @@ do
 
         music.sound = sound
         env.prampa_Music = sound
+
+        sound.Ended:Connect(function()
+            if music.onChange then
+                music.onChange()
+            end
+        end)
     end
 
     function music.isPlaying()
@@ -494052,6 +494058,7 @@ do
         island.BorderSizePixel = 0
         island.Active = true
         island.ClipsDescendants = true
+        island.ZIndex = 10
         island.Parent = screenGui
 
         -- restore a dragged position from a previous run (offset based)
@@ -494213,17 +494220,42 @@ do
         local pickerOk, pickerError = pcall(function()
 
         local PANEL_WIDTH = 300
-        local ROW_HEIGHT = 26
-        local ROW_GAP = 5
+        local PAD = 10
+        local HEADER_HEIGHT = 42
         local SEARCH_HEIGHT = 30
+        local ROW_HEIGHT = 30
+        local ROW_GAP = 4
+
+        local TEXT_IDLE = Color3.fromRGB(205, 205, 216)
+        local TEXT_ACTIVE = Color3.fromRGB(255, 255, 255)
+        local TEXT_MUTED = Color3.fromRGB(135, 135, 150)
+        local HOVER_COLOR = Color3.fromRGB(36, 36, 45)
+
+        local panelOpen = false
+        local panelTween
+        local panelBelow = true
+        local dropletToken = 0
+
+        -- click-outside catcher.  It sits below the island (ZIndex 10), so
+        -- clicking the island still toggles the panel instead of closing it.
+        local overlay = Instance.new('TextButton')
+        overlay.Name = 'SongPickerOverlay'
+        overlay.BackgroundTransparency = 1
+        overlay.BorderSizePixel = 0
+        overlay.Size = UDim2.fromScale(1, 1)
+        overlay.Text = ''
+        overlay.AutoButtonColor = false
+        overlay.Visible = false
+        overlay.ZIndex = 4
+        overlay.Parent = screenGui
 
         local panel = Instance.new('Frame')
         panel.Name = 'SongPicker'
         panel.AnchorPoint = Vector2.new(0.5, 0)
         panel.Position = UDim2.new(0.5, 0, 0, 42)
-        panel.Size = UDim2.fromOffset(0, 0)
+        panel.Size = UDim2.fromOffset(PANEL_WIDTH, 0)
         panel.BackgroundColor3 = Color3.fromRGB(14, 14, 18)
-        panel.BackgroundTransparency = 0.05
+        panel.BackgroundTransparency = 0.08
         panel.BorderSizePixel = 0
         panel.ClipsDescendants = true
         panel.Active = true
@@ -494232,22 +494264,37 @@ do
         panel.Parent = screenGui
 
         local panelCorner = Instance.new('UICorner')
-        panelCorner.CornerRadius = UDim.new(0, 16)
+        panelCorner.CornerRadius = UDim.new(1, 0)
         panelCorner.Parent = panel
 
         local panelStroke = Instance.new('UIStroke')
         panelStroke.Color = ACCENT
-        panelStroke.Transparency = 0.55
+        panelStroke.Transparency = 0.45
         panelStroke.Thickness = 1
         panelStroke.Parent = panel
 
         local panelGradient = Instance.new('UIGradient')
         panelGradient.Rotation = 90
         panelGradient.Color = ColorSequence.new({
-            ColorSequenceKeypoint.new(0, Color3.fromRGB(32, 32, 40)),
-            ColorSequenceKeypoint.new(1, Color3.fromRGB(13, 13, 17)),
+            ColorSequenceKeypoint.new(0, Color3.fromRGB(36, 36, 46)),
+            ColorSequenceKeypoint.new(0.55, Color3.fromRGB(20, 20, 27)),
+            ColorSequenceKeypoint.new(1, Color3.fromRGB(12, 12, 16)),
         })
         panelGradient.Parent = panel
+
+        -- faint inner sheen so the card reads as glass instead of a flat box
+        local glass = Instance.new('Frame')
+        glass.Name = 'Glass'
+        glass.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        glass.BackgroundTransparency = 0.985
+        glass.BorderSizePixel = 0
+        glass.Size = UDim2.fromScale(1, 1)
+        glass.ZIndex = 1
+        glass.Parent = panel
+
+        local glassCorner = Instance.new('UICorner')
+        glassCorner.CornerRadius = UDim.new(1, 0)
+        glassCorner.Parent = glass
 
         -- the liquid bloom that spills out of the island when opening
         local ripple = Instance.new('Frame')
@@ -494287,34 +494334,68 @@ do
         dropletStroke.Thickness = 1
         dropletStroke.Parent = droplet
 
-        local dropletToken = 0
+        local header = Instance.new('Frame')
+        header.Name = 'Header'
+        header.BackgroundTransparency = 1
+        header.Position = UDim2.fromOffset(PAD, PAD)
+        header.Size = UDim2.new(1, -PAD * 2, 0, HEADER_HEIGHT)
+        header.ZIndex = 2
+        header.Parent = panel
 
-        local content = Instance.new('Frame')
-        content.Name = 'Content'
-        content.BackgroundTransparency = 1
-        content.Size = UDim2.fromScale(1, 1)
-        content.ZIndex = 2
-        content.Parent = panel
+        local title = Instance.new('TextLabel')
+        title.Name = 'Title'
+        title.BackgroundTransparency = 1
+        title.Position = UDim2.fromOffset(0, 0)
+        title.Size = UDim2.new(1, -34, 0, 18)
+        title.Font = Enum.Font.GothamBold
+        title.TextSize = 14
+        title.TextColor3 = TEXT_ACTIVE
+        title.TextXAlignment = Enum.TextXAlignment.Left
+        title.Text = 'Music'
+        title.ZIndex = 3
+        title.Parent = header
 
-        local contentPadding = Instance.new('UIPadding')
-        contentPadding.PaddingLeft = UDim.new(0, 10)
-        contentPadding.PaddingRight = UDim.new(0, 10)
-        contentPadding.PaddingTop = UDim.new(0, 10)
-        contentPadding.PaddingBottom = UDim.new(0, 10)
-        contentPadding.Parent = content
+        local nowLabel = Instance.new('TextLabel')
+        nowLabel.Name = 'NowPlaying'
+        nowLabel.BackgroundTransparency = 1
+        nowLabel.Position = UDim2.fromOffset(0, 18)
+        nowLabel.Size = UDim2.new(1, -34, 0, 16)
+        nowLabel.Font = Enum.Font.GothamMedium
+        nowLabel.TextSize = 11
+        nowLabel.TextColor3 = TEXT_MUTED
+        nowLabel.TextXAlignment = Enum.TextXAlignment.Left
+        nowLabel.TextTruncate = Enum.TextTruncate.AtEnd
+        nowLabel.Text = 'choose a song'
+        nowLabel.ZIndex = 3
+        nowLabel.Parent = header
 
-        local contentLayout = Instance.new('UIListLayout')
-        contentLayout.FillDirection = Enum.FillDirection.Vertical
-        contentLayout.SortOrder = Enum.SortOrder.LayoutOrder
-        contentLayout.Padding = UDim.new(0, ROW_GAP)
-        contentLayout.Parent = content
+        local closeButton = Instance.new('TextButton')
+        closeButton.Name = 'Close'
+        closeButton.AnchorPoint = Vector2.new(1, 0)
+        closeButton.Position = UDim2.new(1, 0, 0, -2)
+        closeButton.Size = UDim2.fromOffset(28, 28)
+        closeButton.BackgroundColor3 = HOVER_COLOR
+        closeButton.BackgroundTransparency = 1
+        closeButton.BorderSizePixel = 0
+        closeButton.Font = Enum.Font.GothamBold
+        closeButton.TextSize = 16
+        closeButton.TextColor3 = TEXT_MUTED
+        closeButton.Text = '×'
+        closeButton.AutoButtonColor = false
+        closeButton.ZIndex = 3
+        closeButton.Parent = header
+
+        local closeCorner = Instance.new('UICorner')
+        closeCorner.CornerRadius = UDim.new(0, 8)
+        closeCorner.Parent = closeButton
 
         local search = Instance.new('TextBox')
         search.Name = 'Search'
-        search.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
-        search.BackgroundTransparency = 0.15
+        search.BackgroundColor3 = Color3.fromRGB(24, 24, 32)
+        search.BackgroundTransparency = 0.12
         search.BorderSizePixel = 0
-        search.Size = UDim2.new(1, 0, 0, SEARCH_HEIGHT)
+        search.Position = UDim2.fromOffset(PAD, PAD + HEADER_HEIGHT + 6)
+        search.Size = UDim2.new(1, -PAD * 2, 0, SEARCH_HEIGHT)
         search.Font = Enum.Font.GothamMedium
         search.TextSize = 13
         search.TextColor3 = Color3.fromRGB(235, 235, 245)
@@ -494323,22 +494404,38 @@ do
         search.Text = ''
         search.ClearTextOnFocus = false
         search.TextXAlignment = Enum.TextXAlignment.Left
-        search.LayoutOrder = 0
-        search.ZIndex = 2
-        search.Parent = content
+        search.ZIndex = 3
+        search.Parent = panel
 
         local searchCorner = Instance.new('UICorner')
         searchCorner.CornerRadius = UDim.new(0, 8)
         searchCorner.Parent = search
 
         local searchPadding = Instance.new('UIPadding')
-        searchPadding.PaddingLeft = UDim.new(0, 8)
-        searchPadding.PaddingRight = UDim.new(0, 8)
+        searchPadding.PaddingLeft = UDim.new(0, 9)
+        searchPadding.PaddingRight = UDim.new(0, 9)
         searchPadding.Parent = search
 
-        local TEXT_IDLE = Color3.fromRGB(205, 205, 216)
-        local TEXT_ACTIVE = Color3.fromRGB(255, 255, 255)
-        local HOVER_COLOR = Color3.fromRGB(36, 36, 45)
+        local list = Instance.new('ScrollingFrame')
+        list.Name = 'List'
+        list.BackgroundTransparency = 1
+        list.BorderSizePixel = 0
+        list.Position = UDim2.fromOffset(PAD, PAD + HEADER_HEIGHT + 6 + SEARCH_HEIGHT + 8)
+        list.Size = UDim2.new(1, -PAD * 2, 0, ROW_HEIGHT)
+        list.CanvasSize = UDim2.new(0, 0, 0, 0)
+        list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+        list.ScrollBarThickness = 3
+        list.ScrollBarImageColor3 = ACCENT
+        list.ScrollBarImageTransparency = 0.35
+        list.ScrollingDirection = Enum.ScrollingDirection.Y
+        list.ZIndex = 2
+        list.Parent = panel
+
+        local listLayout = Instance.new('UIListLayout')
+        listLayout.FillDirection = Enum.FillDirection.Vertical
+        listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+        listLayout.Padding = UDim.new(0, ROW_GAP)
+        listLayout.Parent = list
 
         local rows = {}
 
@@ -494351,32 +494448,47 @@ do
             rowFrame.Size = UDim2.new(1, 0, 0, ROW_HEIGHT)
             rowFrame.LayoutOrder = index
             rowFrame.ZIndex = 2
-            rowFrame.Parent = content
+            rowFrame.Parent = list
 
             local rowCorner = Instance.new('UICorner')
             rowCorner.CornerRadius = UDim.new(0, 7)
             rowCorner.Parent = rowFrame
 
+            local activeBar = Instance.new('Frame')
+            activeBar.Name = 'ActiveBar'
+            activeBar.AnchorPoint = Vector2.new(0, 0.5)
+            activeBar.Position = UDim2.new(0, 0, 0.5, 0)
+            activeBar.Size = UDim2.fromOffset(3, ROW_HEIGHT - 12)
+            activeBar.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+            activeBar.BackgroundTransparency = 0.15
+            activeBar.BorderSizePixel = 0
+            activeBar.Visible = false
+            activeBar.ZIndex = 3
+            activeBar.Parent = rowFrame
+
+            local activeCorner = Instance.new('UICorner')
+            activeCorner.CornerRadius = UDim.new(1, 0)
+            activeCorner.Parent = activeBar
+
             local button = Instance.new('TextButton')
             button.Name = 'Track' .. index
             button.BackgroundTransparency = 1
             button.BorderSizePixel = 0
-            button.Size = UDim2.new(1, -30, 1, 0)
+            button.Size = UDim2.new(1, -34, 1, 0)
             button.Font = Enum.Font.GothamMedium
             button.TextSize = 13
             button.TextColor3 = TEXT_IDLE
             button.TextXAlignment = Enum.TextXAlignment.Left
-            button.Text = '    ' .. track.title
+            button.Text = string.format('%02d   %s', index, track.title)
             button.TextTruncate = Enum.TextTruncate.AtEnd
             button.AutoButtonColor = false
             button.ZIndex = 2
             button.Parent = rowFrame
 
             local rowPadding = Instance.new('UIPadding')
-            rowPadding.PaddingLeft = UDim.new(0, 8)
+            rowPadding.PaddingLeft = UDim.new(0, 12)
             rowPadding.Parent = button
 
-            -- small per-song loop toggle
             local loopButton = Instance.new('TextButton')
             loopButton.Name = 'Loop' .. index
             loopButton.AnchorPoint = Vector2.new(1, 0.5)
@@ -494387,7 +494499,7 @@ do
             loopButton.BorderSizePixel = 0
             loopButton.Font = Enum.Font.GothamBold
             loopButton.TextSize = 14
-            loopButton.TextColor3 = TEXT_IDLE
+            loopButton.TextColor3 = TEXT_MUTED
             loopButton.Text = '∞'
             loopButton.AutoButtonColor = false
             loopButton.ZIndex = 3
@@ -494419,7 +494531,6 @@ do
                 hover(false)
             end)
 
-            -- selecting a track plays it; selecting the same one restarts it
             button.Activated:Connect(function()
                 music.play(index)
             end)
@@ -494432,6 +494543,7 @@ do
                 frame = rowFrame,
                 button = button,
                 loopButton = loopButton,
+                activeBar = activeBar,
                 title = track.title,
                 lower = track.title:lower(),
             }
@@ -494443,16 +494555,13 @@ do
         emptyLabel.Size = UDim2.new(1, 0, 0, ROW_HEIGHT)
         emptyLabel.Font = Enum.Font.GothamMedium
         emptyLabel.TextSize = 12
-        emptyLabel.TextColor3 = Color3.fromRGB(140, 140, 152)
+        emptyLabel.TextColor3 = TEXT_MUTED
         emptyLabel.Text = 'no matching song'
         emptyLabel.TextXAlignment = Enum.TextXAlignment.Center
         emptyLabel.LayoutOrder = 100
         emptyLabel.Visible = false
         emptyLabel.ZIndex = 2
-        emptyLabel.Parent = content
-
-        local panelOpen = false
-        local panelTween
+        emptyLabel.Parent = list
 
         local function visibleRowCount()
             local count = 0
@@ -494461,60 +494570,101 @@ do
                     count += 1
                 end
             end
-            if count == 0 then
-                return 1
-            end
-            return count
+            return math.max(1, count)
         end
 
         local function targetPanelHeight()
             local count = visibleRowCount()
-            return 10 + SEARCH_HEIGHT + ROW_GAP
-                + count * ROW_HEIGHT + (count - 1) * ROW_GAP + 10
+            local listHeight = count * ROW_HEIGHT + (count - 1) * ROW_GAP
+            return PAD + HEADER_HEIGHT + 6 + SEARCH_HEIGHT + 8 + listHeight + PAD
         end
 
-        local function positionPanel()
+        local function panelMetrics()
             local absolute = island.AbsolutePosition
             local size = island.AbsoluteSize
             local camera = workspace.CurrentCamera
             local viewport = camera and camera.ViewportSize or Vector2.new(1920, 1080)
-            local height = targetPanelHeight()
+            local gap = 8
+            local contentHeight = targetPanelHeight()
+            local belowY = absolute.Y + size.Y + gap
+            local aboveY = absolute.Y - gap
+            local spaceBelow = viewport.Y - gap - belowY
+            local spaceAbove = aboveY - gap
+            local maxSpace = math.max(0, math.max(spaceBelow, spaceAbove))
+            local height = math.min(contentHeight, math.max(ROW_HEIGHT, maxSpace))
+
+            -- prefer opening below the island, flip above only when the
+            -- space there is genuinely larger
+            panelBelow = spaceBelow >= height or spaceBelow >= spaceAbove
 
             local x = absolute.X + size.X / 2
-            local y = absolute.Y + size.Y + 6
+            local minX = PANEL_WIDTH / 2 + gap
+            x = math.clamp(x, minX, math.max(minX, viewport.X - PANEL_WIDTH / 2 - gap))
 
-            if y + height > viewport.Y - 4 then
-                y = math.max(4, absolute.Y - 6 - height)
+            local y
+            if panelBelow then
+                y = math.clamp(belowY, gap, math.max(gap, viewport.Y - height - gap))
+            else
+                y = math.clamp(aboveY, height + gap, math.max(height + gap, viewport.Y - gap))
             end
 
+            local listHeight = math.max(
+                ROW_HEIGHT,
+                height - (PAD + HEADER_HEIGHT + 6 + SEARCH_HEIGHT + 8 + PAD)
+            )
+
+            return x, y, height, listHeight
+        end
+
+        local function positionPanel()
+            local x, y, height, listHeight = panelMetrics()
+
+            -- anchor the edge that faces the island, so the card opens and
+            -- collapses towards the island instead of drifting away from it
+            panel.AnchorPoint = panelBelow and Vector2.new(0.5, 0) or Vector2.new(0.5, 1)
             panel.Position = UDim2.fromOffset(x, y)
+            list.Size = UDim2.new(1, -PAD * 2, 0, listHeight)
+            return height
         end
 
         local function positionDroplet()
             local absolute = island.AbsolutePosition
             local size = island.AbsoluteSize
-            droplet.Position = UDim2.fromOffset(
-                absolute.X + size.X / 2,
-                absolute.Y + size.Y + 1
-            )
+            local x = absolute.X + size.X / 2
+
+            if panelBelow then
+                droplet.AnchorPoint = Vector2.new(0.5, 0)
+                droplet.Position = UDim2.fromOffset(x, absolute.Y + size.Y + 1)
+            else
+                droplet.AnchorPoint = Vector2.new(0.5, 1)
+                droplet.Position = UDim2.fromOffset(x, absolute.Y - 1)
+            end
         end
 
         local function refreshRows()
+            local currentRow = music.current and rows[music.current] or nil
+
             for index, row in ipairs(rows) do
                 local active = music.current == index
                 local looped = music.isLooped(index)
 
                 row.button.TextColor3 = active and TEXT_ACTIVE or TEXT_IDLE
                 row.button.Font = active and Enum.Font.GothamBold or Enum.Font.GothamMedium
-                row.button.Text = (active and '•  ' or '    ') .. row.title
-
                 row.frame.BackgroundColor3 = active and ACCENT or HOVER_COLOR
                 row.frame.BackgroundTransparency = active and 0.82 or 1
+                row.activeBar.Visible = active
 
                 row.loopButton.TextColor3 = looped
                     and (active and TEXT_ACTIVE or ACCENT)
-                    or Color3.fromRGB(120, 120, 135)
+                    or TEXT_MUTED
                 row.loopButton.BackgroundTransparency = looped and 0.72 or 1
+            end
+
+            if currentRow then
+                nowLabel.Text = (music.isPlaying() and 'now playing · ' or 'paused · ')
+                    .. currentRow.title
+            else
+                nowLabel.Text = 'choose a song'
             end
         end
 
@@ -494526,7 +494676,9 @@ do
                 return
             end
 
-            positionPanel()
+            -- positionPanel re-anchors instantly so the edge nearest the
+            -- island stays pinned while only the size is animated
+            local height = positionPanel()
 
             if panelTween then
                 panelTween:Cancel()
@@ -494534,10 +494686,38 @@ do
 
             panelTween = TweenService:Create(
                 panel,
-                TweenInfo.new(0.24, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
-                { Size = UDim2.fromOffset(PANEL_WIDTH, targetPanelHeight()) }
+                TweenInfo.new(0.22, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+                { Size = UDim2.fromOffset(PANEL_WIDTH, height) }
             )
             panelTween:Play()
+        end
+
+        local function closePanel()
+            if not panelOpen then
+                return
+            end
+            panelOpen = false
+
+            overlay.Visible = false
+            dropletToken += 1
+            droplet.Visible = false
+
+            if panelTween then
+                panelTween:Cancel()
+            end
+
+            panelTween = TweenService:Create(
+                panel,
+                TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+                { Size = UDim2.fromOffset(PANEL_WIDTH, 0) }
+            )
+            panelTween:Play()
+
+            panelTween.Completed:Once(function()
+                if not panelOpen then
+                    panel.Visible = false
+                end
+            end)
         end
 
         local function openPanel()
@@ -494546,16 +494726,33 @@ do
             end
             panelOpen = true
 
+            overlay.Visible = true
             panel.Visible = true
-            panel.Size = UDim2.fromOffset(PANEL_WIDTH, 0)
             panelCorner.CornerRadius = UDim.new(1, 0)
-            positionPanel()
 
-            -- glass droplet: it drips off the island, stretches, then melts
-            -- into the card while the card blooms open underneath it
+            local height = positionPanel()
+            panel.Size = UDim2.fromOffset(PANEL_WIDTH, 0)
+
+            -- bloom from the edge nearest the island
+            ripple.AnchorPoint = panelBelow and Vector2.new(0.5, 0) or Vector2.new(0.5, 1)
+            ripple.Position = panelBelow and UDim2.new(0.5, 0, 0, 0) or UDim2.new(0.5, 0, 1, 0)
+            ripple.Size = UDim2.fromOffset(40, 40)
+            ripple.BackgroundTransparency = 0.4
+
+            TweenService:Create(
+                ripple,
+                TweenInfo.new(0.6, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+                {
+                    Size = UDim2.fromOffset(PANEL_WIDTH * 2, PANEL_WIDTH * 2),
+                    BackgroundTransparency = 1,
+                }
+            ):Play()
+
+            -- glass droplet: drips from the island and melts into the card
             positionDroplet()
             dropletToken += 1
             local token = dropletToken
+            local direction = panelBelow and 1 or -1
 
             droplet.Visible = true
             droplet.Size = UDim2.fromOffset(10, 10)
@@ -494569,7 +494766,7 @@ do
                     Size = UDim2.fromOffset(14, 22),
                     Position = UDim2.fromOffset(
                         droplet.Position.X.Offset,
-                        droplet.Position.Y.Offset + 10
+                        droplet.Position.Y.Offset + 10 * direction
                     ),
                 }
             ):Play()
@@ -494601,19 +494798,6 @@ do
                 end)
             end)
 
-            -- liquid: round pill grows into a card while a soft disc blooms
-            ripple.Size = UDim2.fromOffset(40, 40)
-            ripple.BackgroundTransparency = 0.4
-
-            TweenService:Create(
-                ripple,
-                TweenInfo.new(0.6, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
-                {
-                    Size = UDim2.fromOffset(PANEL_WIDTH * 2, PANEL_WIDTH * 2),
-                    BackgroundTransparency = 1,
-                }
-            ):Play()
-
             TweenService:Create(
                 panelCorner,
                 TweenInfo.new(0.5, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
@@ -494627,36 +494811,9 @@ do
             panelTween = TweenService:Create(
                 panel,
                 TweenInfo.new(0.36, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
-                { Size = UDim2.fromOffset(PANEL_WIDTH, targetPanelHeight()) }
+                { Size = UDim2.fromOffset(PANEL_WIDTH, height) }
             )
             panelTween:Play()
-        end
-
-        local function closePanel()
-            if not panelOpen then
-                return
-            end
-            panelOpen = false
-
-            dropletToken += 1
-            droplet.Visible = false
-
-            if panelTween then
-                panelTween:Cancel()
-            end
-
-            panelTween = TweenService:Create(
-                panel,
-                TweenInfo.new(0.24, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
-                { Size = UDim2.fromOffset(PANEL_WIDTH, 0) }
-            )
-            panelTween:Play()
-
-            panelTween.Completed:Once(function()
-                if not panelOpen then
-                    panel.Visible = false
-                end
-            end)
         end
 
         local function openOrClosePanel()
@@ -494667,10 +494824,18 @@ do
             end
         end
 
-        -- hand the real implementations to the island (declared before the
-        -- pcall so a failure here leaves harmless no-ops behind)
+        -- hand the real implementations to the island
         togglePanel = openOrClosePanel
-        syncPanel = positionPanel
+        syncPanel = function()
+            local height = positionPanel()
+
+            if panelOpen then
+                if panelTween then
+                    panelTween:Cancel()
+                end
+                panel.Size = UDim2.fromOffset(PANEL_WIDTH, height)
+            end
+        end
 
         local function applyFilter()
             local query = search.Text:lower()
@@ -494691,7 +494856,8 @@ do
         end
 
         search.TextChanged:Connect(applyFilter)
-
+        closeButton.Activated:Connect(closePanel)
+        overlay.Activated:Connect(closePanel)
         end)
 
         if not pickerOk then
@@ -494836,10 +495002,13 @@ do
         end
 
         -- dragging + collapse --------------------------------------------
+        --   the island is only converted to an offset position once the
+        --   pointer has actually moved, so a plain click can never make it
+        --   jump to a corner before the panel opens
         local dragging = false
         local moved = false
         local dragStart = Vector2.zero
-        local startPos = island.Position
+        local startAbs = Vector2.zero
 
         island.InputBegan:Connect(function(input)
             if input.UserInputType == Enum.UserInputType.MouseButton1
@@ -494847,16 +495016,7 @@ do
                 dragging = true
                 moved = false
                 dragStart = input.Position
-
-                -- the island spawns centred, so convert to an offset position
-                -- the moment it is touched; movement then stays 1:1
-                if island.AnchorPoint.X ~= 0 or island.AnchorPoint.Y ~= 0 then
-                    local absPosition = island.AbsolutePosition
-                    island.AnchorPoint = Vector2.new(0, 0)
-                    island.Position = UDim2.fromOffset(absPosition.X, absPosition.Y)
-                end
-
-                startPos = island.Position
+                startAbs = island.AbsolutePosition
 
                 local connection
                 connection = input.Changed:Connect(function()
@@ -494865,13 +495025,14 @@ do
                     end
 
                     dragging = false
-                    env.UE_ISLAND_POSITION = island.Position
 
                     if connection then
                         connection:Disconnect()
                     end
 
-                    if not moved then
+                    if moved then
+                        env.UE_ISLAND_POSITION = island.Position
+                    else
                         togglePanel()
                     end
                 end)
@@ -494888,16 +495049,21 @@ do
             end
 
             local delta = input.Position - dragStart
-            if not moved and delta.Magnitude > 4 then
+            if not moved and delta.Magnitude < 5 then
+                return
+            end
+
+            if not moved then
                 moved = true
+                island.AnchorPoint = Vector2.new(0, 0)
             end
 
             local camera = workspace.CurrentCamera
             local viewport = camera and camera.ViewportSize or Vector2.new(1920, 1080)
             local size = island.AbsoluteSize
 
-            local x = math.clamp(startPos.X.Offset + delta.X, 0, math.max(0, viewport.X - size.X))
-            local y = math.clamp(startPos.Y.Offset + delta.Y, 0, math.max(0, viewport.Y - size.Y))
+            local x = math.clamp(startAbs.X + delta.X, 0, math.max(0, viewport.X - size.X))
+            local y = math.clamp(startAbs.Y + delta.Y, 0, math.max(0, viewport.Y - size.Y))
 
             island.Position = UDim2.fromOffset(x, y)
             syncPanel()
