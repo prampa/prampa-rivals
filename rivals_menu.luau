@@ -493537,16 +493537,17 @@ do
     local SHOW_WATERMARK = true
     local MUSIC_BASE = 'https://raw.githubusercontent.com/prampa/prampa-rivals/main/'
     local MUSIC_TRACKS = {
-        { title = 'Panik Atak', file = 'song.ogg' },
-        { title = 'Dönüyo Başım 2.0', file = 'song1.ogg' },
-        { title = 'El clasico', file = 'song2.ogg' },
-        { title = 'Fedakar', file = 'song3.ogg' },
-        { title = 'Gömün Beni Çukura', file = 'song4.ogg' },
-        { title = 'harbiden şekermiş', file = 'song5.ogg' },
-        { title = 'Hoşuna mı Gidiyor', file = 'song6.ogg' },
-        { title = 'Radyoda Neşet', file = 'song7.ogg' },
+        { title = 'Song 1', file = 'song.ogg' },
+        { title = 'Song 2', file = 'song1.ogg' },
+        { title = 'Song 3', file = 'song2.ogg' },
+        { title = 'Song 4', file = 'song3.ogg' },
+        { title = 'Song 5', file = 'song4.ogg' },
+        { title = 'Song 6', file = 'song5.ogg' },
+        { title = 'Song 7', file = 'song6.ogg' },
+        { title = 'Song 8', file = 'song7.ogg' },
     }
     local MUSIC_VOLUME = 0.250
+    local BUILD_ID = 'c816e99d'
     local POLL_SECONDS = 20
 
     local env = getgenv and getgenv() or _G
@@ -493571,6 +493572,11 @@ do
         offline = Color3.fromRGB(128, 132, 142),
         unknown = Color3.fromRGB(150, 150, 160),
     }
+
+    -- printed before anything else, so the console always shows which build
+    -- is running even if the HUD fails to construct
+    env.prampa_BuildID = BUILD_ID
+    print('[' .. BRAND .. '] build ' .. BUILD_ID .. ' starting (' .. tostring(#MUSIC_TRACKS) .. ' tracks)')
 
     -----------------------------------------------------------------------
     -- small helpers
@@ -493877,6 +493883,7 @@ do
         current = nil,
         sound = nil,
         assets = {},
+        loop = {},
     }
 
     local function trackSource(track)
@@ -493906,7 +493913,7 @@ do
     local function prepareMusic()
         local sound = Instance.new('Sound')
         sound.Name = 'prampa_Music'
-        sound.Looped = true
+        sound.Looped = false
         sound.Volume = MUSIC_VOLUME
         sound.Parent = SoundService
 
@@ -493918,6 +493925,37 @@ do
         return music.sound ~= nil and music.sound.IsPlaying == true
     end
 
+    function music.isLooped(index)
+        if not index then
+            return false
+        end
+
+        -- loop is on unless the user turned it off for this track
+        return music.loop[index] ~= false
+    end
+
+    function music.setLoop(index, value)
+        if not music.tracks[index] then
+            return false
+        end
+
+        music.loop[index] = value and true or false
+
+        if music.current == index and music.sound then
+            music.sound.Looped = music.loop[index]
+        end
+
+        if music.onChange then
+            music.onChange()
+        end
+
+        return music.loop[index]
+    end
+
+    function music.toggleLoop(index)
+        return music.setLoop(index, not music.isLooped(index))
+    end
+
     function music.play(index)
         local track = music.tracks[index]
         if not track or not music.sound then
@@ -493926,6 +493964,7 @@ do
 
         -- clicking the current track restarts it instead of layering a copy
         if music.current == index and music.sound.SoundId ~= '' then
+            music.sound.Looped = music.isLooped(index)
             music.sound.TimePosition = 0
             music.sound:Play()
             if music.onChange then
@@ -493946,7 +493985,9 @@ do
             return false
         end
 
+        -- stop the old track first so two songs can never overlap
         music.sound:Stop()
+        music.sound.Looped = music.isLooped(index)
         music.sound.SoundId = asset
         music.sound.TimePosition = 0
         music.sound:Play()
@@ -494164,6 +494205,13 @@ do
         -- song picker (opens instead of collapsing the island)
         -----------------------------------------------------------------------
 
+        -- built inside a pcall: if anything here throws, the island keeps its
+        -- clock, stats and waves instead of silently dying
+        local togglePanel = function() end
+        local syncPanel = function() end
+
+        local pickerOk, pickerError = pcall(function()
+
         local PANEL_WIDTH = 300
         local ROW_HEIGHT = 26
         local ROW_GAP = 5
@@ -494216,6 +494264,30 @@ do
         local rippleCorner = Instance.new('UICorner')
         rippleCorner.CornerRadius = UDim.new(1, 0)
         rippleCorner.Parent = ripple
+
+        -- a glass droplet that falls out of the island and melts into the card
+        local droplet = Instance.new('Frame')
+        droplet.Name = 'Droplet'
+        droplet.AnchorPoint = Vector2.new(0.5, 0)
+        droplet.BackgroundColor3 = ACCENT
+        droplet.BackgroundTransparency = 1
+        droplet.BorderSizePixel = 0
+        droplet.Size = UDim2.fromOffset(12, 12)
+        droplet.ZIndex = 6
+        droplet.Visible = false
+        droplet.Parent = screenGui
+
+        local dropletCorner = Instance.new('UICorner')
+        dropletCorner.CornerRadius = UDim.new(1, 0)
+        dropletCorner.Parent = droplet
+
+        local dropletStroke = Instance.new('UIStroke')
+        dropletStroke.Color = Color3.fromRGB(225, 215, 255)
+        dropletStroke.Transparency = 1
+        dropletStroke.Thickness = 1
+        dropletStroke.Parent = droplet
+
+        local dropletToken = 0
 
         local content = Instance.new('Frame')
         content.Name = 'Content'
@@ -494271,12 +494343,25 @@ do
         local rows = {}
 
         for index, track in ipairs(music.tracks) do
+            local rowFrame = Instance.new('Frame')
+            rowFrame.Name = 'Row' .. index
+            rowFrame.BackgroundColor3 = HOVER_COLOR
+            rowFrame.BackgroundTransparency = 1
+            rowFrame.BorderSizePixel = 0
+            rowFrame.Size = UDim2.new(1, 0, 0, ROW_HEIGHT)
+            rowFrame.LayoutOrder = index
+            rowFrame.ZIndex = 2
+            rowFrame.Parent = content
+
+            local rowCorner = Instance.new('UICorner')
+            rowCorner.CornerRadius = UDim.new(0, 7)
+            rowCorner.Parent = rowFrame
+
             local button = Instance.new('TextButton')
             button.Name = 'Track' .. index
-            button.BackgroundColor3 = HOVER_COLOR
             button.BackgroundTransparency = 1
             button.BorderSizePixel = 0
-            button.Size = UDim2.new(1, 0, 0, ROW_HEIGHT)
+            button.Size = UDim2.new(1, -30, 1, 0)
             button.Font = Enum.Font.GothamMedium
             button.TextSize = 13
             button.TextColor3 = TEXT_IDLE
@@ -494284,28 +494369,54 @@ do
             button.Text = '    ' .. track.title
             button.TextTruncate = Enum.TextTruncate.AtEnd
             button.AutoButtonColor = false
-            button.LayoutOrder = index
             button.ZIndex = 2
-            button.Parent = content
-
-            local rowCorner = Instance.new('UICorner')
-            rowCorner.CornerRadius = UDim.new(0, 7)
-            rowCorner.Parent = button
+            button.Parent = rowFrame
 
             local rowPadding = Instance.new('UIPadding')
             rowPadding.PaddingLeft = UDim.new(0, 8)
             rowPadding.Parent = button
 
-            button.MouseEnter:Connect(function()
+            -- small per-song loop toggle
+            local loopButton = Instance.new('TextButton')
+            loopButton.Name = 'Loop' .. index
+            loopButton.AnchorPoint = Vector2.new(1, 0.5)
+            loopButton.Position = UDim2.new(1, -3, 0.5, 0)
+            loopButton.Size = UDim2.fromOffset(24, 20)
+            loopButton.BackgroundColor3 = ACCENT
+            loopButton.BackgroundTransparency = 1
+            loopButton.BorderSizePixel = 0
+            loopButton.Font = Enum.Font.GothamBold
+            loopButton.TextSize = 14
+            loopButton.TextColor3 = TEXT_IDLE
+            loopButton.Text = '∞'
+            loopButton.AutoButtonColor = false
+            loopButton.ZIndex = 3
+            loopButton.Parent = rowFrame
+
+            local loopCorner = Instance.new('UICorner')
+            loopCorner.CornerRadius = UDim.new(0, 6)
+            loopCorner.Parent = loopButton
+
+            local function hover(on)
                 if music.current ~= index then
-                    button.BackgroundTransparency = 0.9
+                    rowFrame.BackgroundTransparency = on and 0.9 or 1
                 end
+            end
+
+            button.MouseEnter:Connect(function()
+                hover(true)
             end)
 
             button.MouseLeave:Connect(function()
-                if music.current ~= index then
-                    button.BackgroundTransparency = 1
-                end
+                hover(false)
+            end)
+
+            loopButton.MouseEnter:Connect(function()
+                hover(true)
+            end)
+
+            loopButton.MouseLeave:Connect(function()
+                hover(false)
             end)
 
             -- selecting a track plays it; selecting the same one restarts it
@@ -494313,8 +494424,14 @@ do
                 music.play(index)
             end)
 
+            loopButton.Activated:Connect(function()
+                music.toggleLoop(index)
+            end)
+
             rows[index] = {
+                frame = rowFrame,
                 button = button,
+                loopButton = loopButton,
                 title = track.title,
                 lower = track.title:lower(),
             }
@@ -494340,7 +494457,7 @@ do
         local function visibleRowCount()
             local count = 0
             for _, row in ipairs(rows) do
-                if row.button.Visible then
+                if row.frame.Visible then
                     count += 1
                 end
             end
@@ -494373,19 +494490,36 @@ do
             panel.Position = UDim2.fromOffset(x, y)
         end
 
+        local function positionDroplet()
+            local absolute = island.AbsolutePosition
+            local size = island.AbsoluteSize
+            droplet.Position = UDim2.fromOffset(
+                absolute.X + size.X / 2,
+                absolute.Y + size.Y + 1
+            )
+        end
+
         local function refreshRows()
             for index, row in ipairs(rows) do
                 local active = music.current == index
+                local looped = music.isLooped(index)
 
                 row.button.TextColor3 = active and TEXT_ACTIVE or TEXT_IDLE
                 row.button.Font = active and Enum.Font.GothamBold or Enum.Font.GothamMedium
                 row.button.Text = (active and '•  ' or '    ') .. row.title
-                row.button.BackgroundColor3 = active and ACCENT or HOVER_COLOR
-                row.button.BackgroundTransparency = active and 0.82 or 1
+
+                row.frame.BackgroundColor3 = active and ACCENT or HOVER_COLOR
+                row.frame.BackgroundTransparency = active and 0.82 or 1
+
+                row.loopButton.TextColor3 = looped
+                    and (active and TEXT_ACTIVE or ACCENT)
+                    or Color3.fromRGB(120, 120, 135)
+                row.loopButton.BackgroundTransparency = looped and 0.72 or 1
             end
         end
 
         music.onChange = refreshRows
+        refreshRows()
 
         local function resizePanel()
             if not panelOpen then
@@ -494416,6 +494550,56 @@ do
             panel.Size = UDim2.fromOffset(PANEL_WIDTH, 0)
             panelCorner.CornerRadius = UDim.new(1, 0)
             positionPanel()
+
+            -- glass droplet: it drips off the island, stretches, then melts
+            -- into the card while the card blooms open underneath it
+            positionDroplet()
+            dropletToken += 1
+            local token = dropletToken
+
+            droplet.Visible = true
+            droplet.Size = UDim2.fromOffset(10, 10)
+            droplet.BackgroundTransparency = 0.25
+            dropletStroke.Transparency = 0.35
+
+            TweenService:Create(
+                droplet,
+                TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+                {
+                    Size = UDim2.fromOffset(14, 22),
+                    Position = UDim2.fromOffset(
+                        droplet.Position.X.Offset,
+                        droplet.Position.Y.Offset + 10
+                    ),
+                }
+            ):Play()
+
+            task.delay(0.16, function()
+                if token ~= dropletToken then
+                    return
+                end
+
+                TweenService:Create(
+                    droplet,
+                    TweenInfo.new(0.34, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+                    {
+                        Size = UDim2.fromOffset(PANEL_WIDTH * 0.92, 30),
+                        BackgroundTransparency = 1,
+                    }
+                ):Play()
+
+                TweenService:Create(
+                    dropletStroke,
+                    TweenInfo.new(0.34, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+                    { Transparency = 1 }
+                ):Play()
+
+                task.delay(0.36, function()
+                    if token == dropletToken then
+                        droplet.Visible = false
+                    end
+                end)
+            end)
 
             -- liquid: round pill grows into a card while a soft disc blooms
             ripple.Size = UDim2.fromOffset(40, 40)
@@ -494454,6 +494638,9 @@ do
             end
             panelOpen = false
 
+            dropletToken += 1
+            droplet.Visible = false
+
             if panelTween then
                 panelTween:Cancel()
             end
@@ -494472,13 +494659,18 @@ do
             end)
         end
 
-        local function togglePanel()
+        local function openOrClosePanel()
             if panelOpen then
                 closePanel()
             else
                 openPanel()
             end
         end
+
+        -- hand the real implementations to the island (declared before the
+        -- pcall so a failure here leaves harmless no-ops behind)
+        togglePanel = openOrClosePanel
+        syncPanel = positionPanel
 
         local function applyFilter()
             local query = search.Text:lower()
@@ -494487,7 +494679,7 @@ do
             local matches = 0
             for _, row in ipairs(rows) do
                 local match = query == '' or row.lower:find(query, 1, true) ~= nil
-                row.button.Visible = match
+                row.frame.Visible = match
                 if match then
                     matches += 1
                 end
@@ -494499,6 +494691,13 @@ do
         end
 
         search.TextChanged:Connect(applyFilter)
+
+        end)
+
+        if not pickerOk then
+            warn('[' .. BRAND .. '] song picker failed to build: ' .. tostring(pickerError))
+            music.onChange = nil
+        end
 
         -- wave animation ----------------------------------------------------
         task.spawn(function()
@@ -494701,10 +494900,7 @@ do
             local y = math.clamp(startPos.Y.Offset + delta.Y, 0, math.max(0, viewport.Y - size.Y))
 
             island.Position = UDim2.fromOffset(x, y)
-
-            if panelOpen then
-                positionPanel()
-            end
+            syncPanel()
         end)
 
         -- fps ------------------------------------------------------------
@@ -494829,6 +495025,14 @@ do
             return false
         end
 
+        env.UE_SetTrackLoop = function(index, value)
+            return music.setLoop(index, value)
+        end
+
+        env.UE_ToggleTrackLoop = function(index)
+            return music.toggleLoop(index)
+        end
+
         print('[' .. BRAND .. '] HUD ready - drag to move, click for the song picker.')
         if DISCORD_ID == '' then
             print('[' .. BRAND .. '] no Discord user ID set; presence disabled.')
@@ -494887,7 +495091,8 @@ do
     --   getgenv().UE_SetStatus('dnd')
     --   getgenv().UE_ToggleIsland()
     --   getgenv().UE_ToggleSongPicker()
-    --   getgenv().UE_PlayTrack(3) / UE_PlayTrack('fedakar')
+    --   getgenv().UE_PlayTrack(3) / UE_PlayTrack('song 4')
+    --   getgenv().UE_SetTrackLoop(3, false) / UE_ToggleTrackLoop(3)
     --   getgenv().UE_ToggleMusic() / UE_SetMusicVolume(0.5)
     --   getgenv().UE_DumpTextLabels()
     -----------------------------------------------------------------------
@@ -494927,23 +495132,35 @@ do
     -----------------------------------------------------------------------
 
     task.spawn(function()
+        local function step(label, fn)
+            local ok, err = pcall(fn)
+            if not ok then
+                warn('[' .. BRAND .. '] ' .. label .. ' failed: ' .. tostring(err))
+            end
+            return ok
+        end
+
         local waited = 0
 
         while waited < 300 do
             if type(env.Library) == 'table'
                 and typeof(env.Library.ScreenGui) == 'Instance' then
-                watchTitle()
-                prepareMusic()
-                buildIsland()
+                step('title hook', watchTitle)
+                step('music player', prepareMusic)
+                step('island', buildIsland)
+
                 if SHOW_WATERMARK then
-                    buildWatermark()
+                    step('watermark', buildWatermark)
                 end
 
-                if #music.tracks > 0 then
-                    task.spawn(function()
-                        music.play(1)
-                    end)
-                end
+                print('[' .. BRAND .. '] build ' .. BUILD_ID .. ' HUD ready')
+
+                task.spawn(function()
+                    local ok, err = pcall(music.play, 1)
+                    if not ok then
+                        warn('[' .. BRAND .. '] autoplay failed: ' .. tostring(err))
+                    end
+                end)
                 return
             end
 
