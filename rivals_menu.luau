@@ -493537,17 +493537,17 @@ do
     local SHOW_WATERMARK = true
     local MUSIC_BASE = 'https://raw.githubusercontent.com/prampa/prampa-rivals/main/'
     local MUSIC_TRACKS = {
-        { title = 'Panik Atak', file = 'song.ogg' },
-        { title = 'Dönüyo Başım 2.0', file = 'song1.ogg' },
-        { title = 'El clasico', file = 'song2.ogg' },
-        { title = 'Fedakar', file = 'song3.ogg' },
-        { title = 'Gömün Beni Çukura', file = 'song4.ogg' },
-        { title = 'harbiden şekermiş', file = 'song5.ogg' },
-        { title = 'Hoşuna mı Gidiyor', file = 'song6.ogg' },
-        { title = 'Radyoda Neşet', file = 'song7.ogg' },
+        { title = 'Panik Atak', file = 'song.ogg', duration = 147.3 },
+        { title = 'Dönüyo Başım 2.0', file = 'song1.ogg', duration = 123.1 },
+        { title = 'El clasico', file = 'song2.ogg', duration = 124.3 },
+        { title = 'Fedakar', file = 'song3.ogg', duration = 207.9 },
+        { title = 'Gömün Beni Çukura', file = 'song4.ogg', duration = 196 },
+        { title = 'harbiden şekermiş', file = 'song5.ogg', duration = 165.1 },
+        { title = 'Hoşuna mı Gidiyor', file = 'song6.ogg', duration = 151.9 },
+        { title = 'Radyoda Neşet', file = 'song7.ogg', duration = 171.1 },
     }
     local MUSIC_VOLUME = 0.250
-    local BUILD_ID = '98c4c809'
+    local BUILD_ID = '7b35a239'
     local POLL_SECONDS = 20
 
     local env = getgenv and getgenv() or _G
@@ -493873,6 +493873,66 @@ do
     end
 
     -----------------------------------------------------------------------
+    -- persisted settings
+    --   tiny json file in the executor workspace: last track, volume,
+    --   per-track loop flags and the dragged island position
+    -----------------------------------------------------------------------
+
+    local CONFIG_FILE = BRAND .. '_config.json'
+    local config = {}
+    local configToken = 0
+
+    local function loadConfig()
+        if type(readfile) ~= 'function' or type(isfile) ~= 'function' then
+            return
+        end
+
+        local okFile, exists = pcall(isfile, CONFIG_FILE)
+        if not okFile or not exists then
+            return
+        end
+
+        local okRead, raw = pcall(readfile, CONFIG_FILE)
+        if not okRead or type(raw) ~= 'string' or raw == '' then
+            return
+        end
+
+        local okDecode, value = pcall(function()
+            return HttpService:JSONDecode(raw)
+        end)
+        if okDecode and type(value) == 'table' then
+            config = value
+        end
+    end
+
+    local function saveConfig()
+        if type(writefile) ~= 'function' then
+            return
+        end
+
+        local okEncode, raw = pcall(function()
+            return HttpService:JSONEncode(config)
+        end)
+        if okEncode and type(raw) == 'string' then
+            pcall(writefile, CONFIG_FILE, raw)
+        end
+    end
+
+    -- collapse bursts (volume scrubbing, loop toggles) into one write
+    local function queueSave(seconds)
+        configToken += 1
+        local token = configToken
+
+        task.delay(seconds or 0.4, function()
+            if token == configToken then
+                saveConfig()
+            end
+        end)
+    end
+
+    loadConfig()
+
+    -----------------------------------------------------------------------
     -- background music controller
     --   one Sound instance is reused for every track, so tracks can never
     --   play on top of each other; selecting the current one restarts it
@@ -493884,7 +493944,19 @@ do
         sound = nil,
         assets = {},
         loop = {},
+        volume = math.clamp(tonumber(config.volume) or MUSIC_VOLUME, 0, 1),
+        fadeToken = 0,
     }
+
+    -- restore per-track loop settings (saved as a dense 1-based array)
+    if type(config.loop) == 'table' then
+        for index = 1, #MUSIC_TRACKS do
+            local value = config.loop[index]
+            if value ~= nil then
+                music.loop[index] = value and true or false
+            end
+        end
+    end
 
     local function trackSource(track)
         local file = track and track.file
@@ -493910,17 +493982,37 @@ do
         return string.format('prampa_%d_%s', hash, name)
     end
 
+    local function saveLoopMask()
+        config.loop = {}
+
+        for index = 1, #music.tracks do
+            config.loop[index] = music.isLooped(index)
+        end
+
+        queueSave()
+    end
+
     local function prepareMusic()
         local sound = Instance.new('Sound')
         sound.Name = 'prampa_Music'
         sound.Looped = false
-        sound.Volume = MUSIC_VOLUME
+        sound.Volume = music.volume
         sound.Parent = SoundService
 
         music.sound = sound
         env.prampa_Music = sound
 
         sound.Ended:Connect(function()
+            -- a song that finished with its loop off rolls on to the next
+            if music.current and not music.isLooped(music.current) then
+                local nextIndex = music.current + 1
+
+                if nextIndex <= #music.tracks then
+                    music.play(nextIndex)
+                    return
+                end
+            end
+
             if music.onChange then
                 music.onChange()
             end
@@ -493951,6 +494043,8 @@ do
             music.sound.Looped = music.loop[index]
         end
 
+        saveLoopMask()
+
         if music.onChange then
             music.onChange()
         end
@@ -493960,6 +494054,91 @@ do
 
     function music.toggleLoop(index)
         return music.setLoop(index, not music.isLooped(index))
+    end
+
+    function music.length(index)
+        index = index or music.current
+        if not index then
+            return 0
+        end
+
+        if index == music.current and music.sound and music.sound.TimeLength > 0 then
+            return music.sound.TimeLength
+        end
+
+        local track = music.tracks[index]
+        return (track and tonumber(track.duration)) or 0
+    end
+
+    function music.position()
+        if music.sound then
+            return math.max(0, music.sound.TimePosition)
+        end
+        return 0
+    end
+
+    function music.fadeTo(target, duration, done)
+        if not music.sound then
+            return
+        end
+
+        target = math.clamp(target, 0, 1)
+        music.fadeToken += 1
+        local token = music.fadeToken
+
+        TweenService:Create(
+            music.sound,
+            TweenInfo.new(math.max(0.01, duration), Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+            { Volume = target }
+        ):Play()
+
+        if done then
+            task.delay(math.max(0.01, duration), function()
+                if token == music.fadeToken then
+                    music.sound.Volume = target
+                    done()
+                end
+            end)
+        end
+    end
+
+    function music.seek(seconds)
+        if not music.current or not music.sound then
+            return false
+        end
+
+        local total = music.length(music.current)
+        if total <= 0 then
+            return false
+        end
+
+        music.sound.TimePosition = math.clamp(tonumber(seconds) or 0, 0, math.max(0, total - 0.05))
+
+        if music.onChange then
+            music.onChange()
+        end
+
+        return true
+    end
+
+    function music.step(delta)
+        local count = #music.tracks
+        if count == 0 then
+            return false
+        end
+
+        if not music.current then
+            return music.play(1)
+        end
+
+        local target = music.current + delta
+        if target < 1 then
+            target = count
+        elseif target > count then
+            target = 1
+        end
+
+        return music.play(target)
     end
 
     function music.play(index)
@@ -493972,7 +494151,10 @@ do
         if music.current == index and music.sound.SoundId ~= '' then
             music.sound.Looped = music.isLooped(index)
             music.sound.TimePosition = 0
+            music.sound.Volume = 0
             music.sound:Play()
+            music.fadeTo(music.volume, 0.2)
+
             if music.onChange then
                 music.onChange()
             end
@@ -493996,8 +494178,14 @@ do
         music.sound.Looped = music.isLooped(index)
         music.sound.SoundId = asset
         music.sound.TimePosition = 0
+        music.sound.Volume = 0
         music.sound:Play()
+
         music.current = index
+        music.fadeTo(music.volume, 0.25)
+
+        config.track = index
+        queueSave()
 
         if music.onChange then
             music.onChange()
@@ -494012,9 +494200,18 @@ do
         end
 
         if music.sound.IsPlaying then
-            music.sound:Pause()
+            music.fadeTo(0, 0.14, function()
+                music.sound:Pause()
+                music.sound.Volume = music.volume
+
+                if music.onChange then
+                    music.onChange()
+                end
+            end)
         elseif music.current then
+            music.sound.Volume = 0
             music.sound:Play()
+            music.fadeTo(music.volume, 0.2)
         elseif #music.tracks > 0 then
             music.play(1)
         end
@@ -494028,9 +494225,25 @@ do
 
     function music.setVolume(value)
         local number = tonumber(value)
-        if number and music.sound then
-            music.sound.Volume = math.clamp(number, 0, 1)
+        if not number then
+            return music.volume
         end
+
+        music.volume = math.clamp(number, 0, 1)
+        music.fadeToken += 1
+
+        if music.sound then
+            music.sound.Volume = music.volume
+        end
+
+        config.volume = music.volume
+        queueSave()
+
+        if music.onChange then
+            music.onChange()
+        end
+
+        return music.volume
     end
 
     -----------------------------------------------------------------------
@@ -494066,6 +494279,14 @@ do
         if typeof(savedPosition) == 'UDim2' then
             island.AnchorPoint = Vector2.new(0, 0)
             island.Position = savedPosition
+        elseif type(config.island) == 'table'
+            and type(config.island.x) == 'number'
+            and type(config.island.y) == 'number' then
+            island.AnchorPoint = Vector2.new(0, 0)
+            island.Position = UDim2.fromOffset(
+                math.max(0, config.island.x),
+                math.max(0, config.island.y)
+            )
         end
 
         local corner = Instance.new('UICorner')
@@ -494216,25 +494437,57 @@ do
         -- clock, stats and waves instead of silently dying
         local togglePanel = function() end
         local syncPanel = function() end
+        local closePanel = function() end
 
         local pickerOk, pickerError = pcall(function()
 
-        local PANEL_WIDTH = 300
-        local PAD = 10
-        local HEADER_HEIGHT = 42
-        local SEARCH_HEIGHT = 30
-        local ROW_HEIGHT = 30
-        local ROW_GAP = 4
+        local PANEL_WIDTH = 322
+        local PAD = 12
+        local HEADER_HEIGHT = 44
+        local PROGRESS_HEIGHT = 26
+        local TRANSPORT_HEIGHT = 28
+        local SEARCH_HEIGHT = 28
+        local ROW_HEIGHT = 34
+        local ROW_GAP = 3
+        local FOOTER_HEIGHT = 16
+        local SEARCH_TOP = PAD + HEADER_HEIGHT + 10 + PROGRESS_HEIGHT + 6 + TRANSPORT_HEIGHT + 8
+        local LIST_TOP = SEARCH_TOP + SEARCH_HEIGHT + 8
+        local CHROME = LIST_TOP + 8 + FOOTER_HEIGHT + PAD
 
-        local TEXT_IDLE = Color3.fromRGB(205, 205, 216)
+        local TEXT_IDLE = Color3.fromRGB(207, 207, 220)
         local TEXT_ACTIVE = Color3.fromRGB(255, 255, 255)
-        local TEXT_MUTED = Color3.fromRGB(135, 135, 150)
-        local HOVER_COLOR = Color3.fromRGB(36, 36, 45)
+        local TEXT_MUTED = Color3.fromRGB(142, 142, 158)
+        local TEXT_DIM = Color3.fromRGB(114, 114, 130)
+        local ROW_TINT = Color3.fromRGB(255, 255, 255)
 
         local panelOpen = false
         local panelTween
         local panelBelow = true
         local dropletToken = 0
+        local selected = music.current or 1
+        local loadingIndex = nil
+        local failedTitle = nil
+
+        -- forward declarations: row handlers are connected before the
+        -- implementations below exist
+        local applyRowStyle
+        local refreshRows
+        local updateHeader
+        local updateProgress
+        local updateVolume
+        local loadAndPlay
+        local scrollToSelected
+
+        local function formatTime(seconds)
+            seconds = math.max(0, math.floor((tonumber(seconds) or 0) + 0.5))
+            return string.format('%d:%02d', math.floor(seconds / 60), seconds % 60)
+        end
+
+        local function coverColors(index)
+            local hue = (0.66 + (index - 1) * 0.038) % 1
+            local base = Color3.fromHSV(hue, 0.52, 0.9)
+            return base, base:Lerp(Color3.new(0, 0, 0), 0.5)
+        end
 
         -- click-outside catcher.  It sits below the island (ZIndex 10), so
         -- clicking the island still toggles the panel instead of closing it.
@@ -494254,8 +494507,8 @@ do
         panel.AnchorPoint = Vector2.new(0.5, 0)
         panel.Position = UDim2.new(0.5, 0, 0, 42)
         panel.Size = UDim2.fromOffset(PANEL_WIDTH, 0)
-        panel.BackgroundColor3 = Color3.fromRGB(14, 14, 18)
-        panel.BackgroundTransparency = 0.08
+        panel.BackgroundColor3 = Color3.fromRGB(13, 13, 17)
+        panel.BackgroundTransparency = 0.06
         panel.BorderSizePixel = 0
         panel.ClipsDescendants = true
         panel.Active = true
@@ -494269,16 +494522,16 @@ do
 
         local panelStroke = Instance.new('UIStroke')
         panelStroke.Color = ACCENT
-        panelStroke.Transparency = 0.45
+        panelStroke.Transparency = 0.42
         panelStroke.Thickness = 1
         panelStroke.Parent = panel
 
         local panelGradient = Instance.new('UIGradient')
         panelGradient.Rotation = 90
         panelGradient.Color = ColorSequence.new({
-            ColorSequenceKeypoint.new(0, Color3.fromRGB(36, 36, 46)),
-            ColorSequenceKeypoint.new(0.55, Color3.fromRGB(20, 20, 27)),
-            ColorSequenceKeypoint.new(1, Color3.fromRGB(12, 12, 16)),
+            ColorSequenceKeypoint.new(0, Color3.fromRGB(38, 38, 49)),
+            ColorSequenceKeypoint.new(0.5, Color3.fromRGB(21, 21, 28)),
+            ColorSequenceKeypoint.new(1, Color3.fromRGB(11, 11, 15)),
         })
         panelGradient.Parent = panel
 
@@ -494334,6 +494587,7 @@ do
         dropletStroke.Thickness = 1
         dropletStroke.Parent = droplet
 
+        -- header: cover tile, song title, live status, close -----------------
         local header = Instance.new('Frame')
         header.Name = 'Header'
         header.BackgroundTransparency = 1
@@ -494342,43 +494596,82 @@ do
         header.ZIndex = 2
         header.Parent = panel
 
-        local title = Instance.new('TextLabel')
-        title.Name = 'Title'
-        title.BackgroundTransparency = 1
-        title.Position = UDim2.fromOffset(0, 0)
-        title.Size = UDim2.new(1, -34, 0, 18)
-        title.Font = Enum.Font.GothamBold
-        title.TextSize = 14
-        title.TextColor3 = TEXT_ACTIVE
-        title.TextXAlignment = Enum.TextXAlignment.Left
-        title.Text = 'Music'
-        title.ZIndex = 3
-        title.Parent = header
+        local cover = Instance.new('Frame')
+        cover.Name = 'Cover'
+        cover.Position = UDim2.fromOffset(0, 1)
+        cover.Size = UDim2.fromOffset(38, 38)
+        cover.BackgroundColor3 = ACCENT
+        cover.BorderSizePixel = 0
+        cover.ZIndex = 3
+        cover.Parent = header
 
-        local nowLabel = Instance.new('TextLabel')
-        nowLabel.Name = 'NowPlaying'
-        nowLabel.BackgroundTransparency = 1
-        nowLabel.Position = UDim2.fromOffset(0, 18)
-        nowLabel.Size = UDim2.new(1, -34, 0, 16)
-        nowLabel.Font = Enum.Font.GothamMedium
-        nowLabel.TextSize = 11
-        nowLabel.TextColor3 = TEXT_MUTED
-        nowLabel.TextXAlignment = Enum.TextXAlignment.Left
-        nowLabel.TextTruncate = Enum.TextTruncate.AtEnd
-        nowLabel.Text = 'choose a song'
-        nowLabel.ZIndex = 3
-        nowLabel.Parent = header
+        local coverCorner = Instance.new('UICorner')
+        coverCorner.CornerRadius = UDim.new(0, 11)
+        coverCorner.Parent = cover
+
+        local coverGradient = Instance.new('UIGradient')
+        coverGradient.Rotation = 135
+        coverGradient.Color = ColorSequence.new(
+            ACCENT,
+            ACCENT:Lerp(Color3.new(0, 0, 0), 0.5)
+        )
+        coverGradient.Parent = cover
+
+        local coverStroke = Instance.new('UIStroke')
+        coverStroke.Color = Color3.fromRGB(255, 255, 255)
+        coverStroke.Transparency = 0.8
+        coverStroke.Thickness = 1
+        coverStroke.Parent = cover
+
+        local coverNumber = Instance.new('TextLabel')
+        coverNumber.Name = 'CoverNumber'
+        coverNumber.BackgroundTransparency = 1
+        coverNumber.Size = UDim2.fromScale(1, 1)
+        coverNumber.Font = Enum.Font.GothamBold
+        coverNumber.TextSize = 13
+        coverNumber.TextColor3 = Color3.fromRGB(255, 255, 255)
+        coverNumber.Text = '01'
+        coverNumber.ZIndex = 4
+        coverNumber.Parent = cover
+
+        local titleLabel = Instance.new('TextLabel')
+        titleLabel.Name = 'Title'
+        titleLabel.BackgroundTransparency = 1
+        titleLabel.Position = UDim2.fromOffset(48, -1)
+        titleLabel.Size = UDim2.new(1, -48 - 30, 0, 20)
+        titleLabel.Font = Enum.Font.GothamBold
+        titleLabel.TextSize = 14
+        titleLabel.TextColor3 = TEXT_ACTIVE
+        titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+        titleLabel.TextTruncate = Enum.TextTruncate.AtEnd
+        titleLabel.Text = 'Music'
+        titleLabel.ZIndex = 3
+        titleLabel.Parent = header
+
+        local statusLabel = Instance.new('TextLabel')
+        statusLabel.Name = 'Status'
+        statusLabel.BackgroundTransparency = 1
+        statusLabel.Position = UDim2.fromOffset(48, 19)
+        statusLabel.Size = UDim2.new(1, -48 - 30, 0, 16)
+        statusLabel.Font = Enum.Font.GothamMedium
+        statusLabel.TextSize = 11
+        statusLabel.TextColor3 = TEXT_MUTED
+        statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+        statusLabel.TextTruncate = Enum.TextTruncate.AtEnd
+        statusLabel.Text = 'choose a song'
+        statusLabel.ZIndex = 3
+        statusLabel.Parent = header
 
         local closeButton = Instance.new('TextButton')
         closeButton.Name = 'Close'
         closeButton.AnchorPoint = Vector2.new(1, 0)
-        closeButton.Position = UDim2.new(1, 0, 0, -2)
-        closeButton.Size = UDim2.fromOffset(28, 28)
-        closeButton.BackgroundColor3 = HOVER_COLOR
+        closeButton.Position = UDim2.new(1, 0, 0, -4)
+        closeButton.Size = UDim2.fromOffset(30, 30)
+        closeButton.BackgroundColor3 = ROW_TINT
         closeButton.BackgroundTransparency = 1
         closeButton.BorderSizePixel = 0
         closeButton.Font = Enum.Font.GothamBold
-        closeButton.TextSize = 16
+        closeButton.TextSize = 17
         closeButton.TextColor3 = TEXT_MUTED
         closeButton.Text = '×'
         closeButton.AutoButtonColor = false
@@ -494386,18 +494679,175 @@ do
         closeButton.Parent = header
 
         local closeCorner = Instance.new('UICorner')
-        closeCorner.CornerRadius = UDim.new(0, 8)
+        closeCorner.CornerRadius = UDim.new(0, 9)
         closeCorner.Parent = closeButton
 
+        -- progress ---------------------------------------------------------
+        local progressTop = PAD + HEADER_HEIGHT + 10
+        local progressButton = Instance.new('TextButton')
+        progressButton.Name = 'Progress'
+        progressButton.BackgroundTransparency = 1
+        progressButton.BorderSizePixel = 0
+        progressButton.Position = UDim2.fromOffset(PAD, progressTop)
+        progressButton.Size = UDim2.new(1, -PAD * 2, 0, 14)
+        progressButton.Text = ''
+        progressButton.AutoButtonColor = false
+        progressButton.ZIndex = 3
+        progressButton.Parent = panel
+
+        local rail = Instance.new('Frame')
+        rail.Name = 'Rail'
+        rail.AnchorPoint = Vector2.new(0, 0.5)
+        rail.Position = UDim2.new(0, 0, 0.5, 0)
+        rail.Size = UDim2.new(1, 0, 0, 4)
+        rail.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        rail.BackgroundTransparency = 0.86
+        rail.BorderSizePixel = 0
+        rail.ZIndex = 3
+        rail.Parent = progressButton
+
+        local railCorner = Instance.new('UICorner')
+        railCorner.CornerRadius = UDim.new(1, 0)
+        railCorner.Parent = rail
+
+        local fill = Instance.new('Frame')
+        fill.Name = 'Fill'
+        fill.AnchorPoint = Vector2.new(0, 0.5)
+        fill.Position = UDim2.new(0, 0, 0.5, 0)
+        fill.Size = UDim2.new(0, 0, 1, 0)
+        fill.BackgroundColor3 = ACCENT
+        fill.BorderSizePixel = 0
+        fill.ZIndex = 3
+        fill.Parent = rail
+
+        local fillCorner = Instance.new('UICorner')
+        fillCorner.CornerRadius = UDim.new(1, 0)
+        fillCorner.Parent = fill
+
+        local knob = Instance.new('Frame')
+        knob.Name = 'Knob'
+        knob.AnchorPoint = Vector2.new(0.5, 0.5)
+        knob.Position = UDim2.new(1, 0, 0.5, 0)
+        knob.Size = UDim2.fromOffset(8, 8)
+        knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        knob.BorderSizePixel = 0
+        knob.ZIndex = 4
+        knob.Parent = fill
+
+        local knobCorner = Instance.new('UICorner')
+        knobCorner.CornerRadius = UDim.new(1, 0)
+        knobCorner.Parent = knob
+
+        local elapsedLabel = Instance.new('TextLabel')
+        elapsedLabel.Name = 'Elapsed'
+        elapsedLabel.BackgroundTransparency = 1
+        elapsedLabel.Position = UDim2.fromOffset(PAD, progressTop + 15)
+        elapsedLabel.Size = UDim2.fromOffset(44, 11)
+        elapsedLabel.Font = Enum.Font.GothamMedium
+        elapsedLabel.TextSize = 10
+        elapsedLabel.TextColor3 = TEXT_DIM
+        elapsedLabel.TextXAlignment = Enum.TextXAlignment.Left
+        elapsedLabel.Text = '0:00'
+        elapsedLabel.ZIndex = 3
+        elapsedLabel.Parent = panel
+
+        local totalLabel = Instance.new('TextLabel')
+        totalLabel.Name = 'Total'
+        totalLabel.AnchorPoint = Vector2.new(1, 0)
+        totalLabel.Position = UDim2.new(1, -PAD, 0, progressTop + 15)
+        totalLabel.Size = UDim2.fromOffset(44, 11)
+        totalLabel.Font = Enum.Font.GothamMedium
+        totalLabel.TextSize = 10
+        totalLabel.TextColor3 = TEXT_DIM
+        totalLabel.TextXAlignment = Enum.TextXAlignment.Right
+        totalLabel.Text = '0:00'
+        totalLabel.ZIndex = 3
+        totalLabel.Parent = panel
+
+        -- transport --------------------------------------------------------
+        local transport = Instance.new('Frame')
+        transport.Name = 'Transport'
+        transport.BackgroundTransparency = 1
+        transport.Position = UDim2.fromOffset(PAD, SEARCH_TOP - 8 - TRANSPORT_HEIGHT)
+        transport.Size = UDim2.new(1, -PAD * 2, 0, TRANSPORT_HEIGHT)
+        transport.ZIndex = 3
+        transport.Parent = panel
+
+        local function makeControl(name, text, width, offset, textSize)
+            local control = Instance.new('TextButton')
+            control.Name = name
+            control.AnchorPoint = Vector2.new(0.5, 0.5)
+            control.Position = UDim2.new(0.5, offset, 0.5, 0)
+            control.Size = UDim2.fromOffset(width, TRANSPORT_HEIGHT - 2)
+            control.BackgroundColor3 = ROW_TINT
+            control.BackgroundTransparency = 1
+            control.BorderSizePixel = 0
+            control.Font = Enum.Font.GothamBold
+            control.TextSize = textSize or 15
+            control.TextColor3 = TEXT_IDLE
+            control.Text = text
+            control.AutoButtonColor = false
+            control.ZIndex = 3
+            control.Parent = transport
+
+            local corner = Instance.new('UICorner')
+            corner.CornerRadius = UDim.new(0, 9)
+            corner.Parent = control
+
+            return control
+        end
+
+        local prevControl = makeControl('Prev', '«', 30, -48, 20)
+        local playButton = makeControl('Play', '▶', 36, 0, 14)
+        local nextControl = makeControl('Next', '»', 30, 48, 20)
+        local loopControl = makeControl('Loop', '∞', 28, 0, 15)
+
+        loopControl.AnchorPoint = Vector2.new(1, 0.5)
+        loopControl.Position = UDim2.new(1, 0, 0.5, 0)
+
+        playButton.BackgroundColor3 = ACCENT
+        playButton.BackgroundTransparency = 0.8
+        playButton.TextColor3 = TEXT_ACTIVE
+
+        local function bindHover(button, baseTransparency, baseColor)
+            button.MouseEnter:Connect(function()
+                TweenService:Create(
+                    button,
+                    TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+                    { BackgroundTransparency = math.max(0, baseTransparency - 0.1) }
+                ):Play()
+                if baseColor then
+                    button.TextColor3 = TEXT_ACTIVE
+                end
+            end)
+
+            button.MouseLeave:Connect(function()
+                TweenService:Create(
+                    button,
+                    TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+                    { BackgroundTransparency = baseTransparency }
+                ):Play()
+                if baseColor then
+                    button.TextColor3 = baseColor
+                end
+            end)
+        end
+
+        bindHover(prevControl, 1, TEXT_IDLE)
+        bindHover(nextControl, 1, TEXT_IDLE)
+        bindHover(playButton, 0.8, TEXT_ACTIVE)
+        bindHover(loopControl, 1)
+
+        -- search -----------------------------------------------------------
         local search = Instance.new('TextBox')
         search.Name = 'Search'
         search.BackgroundColor3 = Color3.fromRGB(24, 24, 32)
-        search.BackgroundTransparency = 0.12
+        search.BackgroundTransparency = 0.1
         search.BorderSizePixel = 0
-        search.Position = UDim2.fromOffset(PAD, PAD + HEADER_HEIGHT + 6)
+        search.Position = UDim2.fromOffset(PAD, SEARCH_TOP)
         search.Size = UDim2.new(1, -PAD * 2, 0, SEARCH_HEIGHT)
         search.Font = Enum.Font.GothamMedium
-        search.TextSize = 13
+        search.TextSize = 12
         search.TextColor3 = Color3.fromRGB(235, 235, 245)
         search.PlaceholderText = 'search songs'
         search.PlaceholderColor3 = Color3.fromRGB(130, 130, 145)
@@ -494408,19 +494858,36 @@ do
         search.Parent = panel
 
         local searchCorner = Instance.new('UICorner')
-        searchCorner.CornerRadius = UDim.new(0, 8)
+        searchCorner.CornerRadius = UDim.new(0, 9)
         searchCorner.Parent = search
 
         local searchPadding = Instance.new('UIPadding')
-        searchPadding.PaddingLeft = UDim.new(0, 9)
-        searchPadding.PaddingRight = UDim.new(0, 9)
+        searchPadding.PaddingLeft = UDim.new(0, 10)
+        searchPadding.PaddingRight = UDim.new(0, 28)
         searchPadding.Parent = search
 
+        local clearSearch = Instance.new('TextButton')
+        clearSearch.Name = 'Clear'
+        clearSearch.AnchorPoint = Vector2.new(1, 0.5)
+        clearSearch.Position = UDim2.new(1, -4, 0.5, 0)
+        clearSearch.Size = UDim2.fromOffset(22, 22)
+        clearSearch.BackgroundTransparency = 1
+        clearSearch.BorderSizePixel = 0
+        clearSearch.Font = Enum.Font.GothamBold
+        clearSearch.TextSize = 12
+        clearSearch.TextColor3 = TEXT_MUTED
+        clearSearch.Text = '×'
+        clearSearch.AutoButtonColor = false
+        clearSearch.Visible = false
+        clearSearch.ZIndex = 4
+        clearSearch.Parent = search
+
+        -- list -------------------------------------------------------------
         local list = Instance.new('ScrollingFrame')
         list.Name = 'List'
         list.BackgroundTransparency = 1
         list.BorderSizePixel = 0
-        list.Position = UDim2.fromOffset(PAD, PAD + HEADER_HEIGHT + 6 + SEARCH_HEIGHT + 8)
+        list.Position = UDim2.fromOffset(PAD, LIST_TOP)
         list.Size = UDim2.new(1, -PAD * 2, 0, ROW_HEIGHT)
         list.CanvasSize = UDim2.new(0, 0, 0, 0)
         list.AutomaticCanvasSize = Enum.AutomaticSize.Y
@@ -494442,7 +494909,7 @@ do
         for index, track in ipairs(music.tracks) do
             local rowFrame = Instance.new('Frame')
             rowFrame.Name = 'Row' .. index
-            rowFrame.BackgroundColor3 = HOVER_COLOR
+            rowFrame.BackgroundColor3 = ROW_TINT
             rowFrame.BackgroundTransparency = 1
             rowFrame.BorderSizePixel = 0
             rowFrame.Size = UDim2.new(1, 0, 0, ROW_HEIGHT)
@@ -494451,14 +494918,14 @@ do
             rowFrame.Parent = list
 
             local rowCorner = Instance.new('UICorner')
-            rowCorner.CornerRadius = UDim.new(0, 7)
+            rowCorner.CornerRadius = UDim.new(0, 8)
             rowCorner.Parent = rowFrame
 
             local activeBar = Instance.new('Frame')
             activeBar.Name = 'ActiveBar'
             activeBar.AnchorPoint = Vector2.new(0, 0.5)
             activeBar.Position = UDim2.new(0, 0, 0.5, 0)
-            activeBar.Size = UDim2.fromOffset(3, ROW_HEIGHT - 12)
+            activeBar.Size = UDim2.fromOffset(3, ROW_HEIGHT - 14)
             activeBar.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
             activeBar.BackgroundTransparency = 0.15
             activeBar.BorderSizePixel = 0
@@ -494470,48 +494937,111 @@ do
             activeCorner.CornerRadius = UDim.new(1, 0)
             activeCorner.Parent = activeBar
 
+            local rowCover = Instance.new('Frame')
+            rowCover.Name = 'Cover'
+            rowCover.Position = UDim2.fromOffset(8, 6)
+            rowCover.Size = UDim2.fromOffset(22, 22)
+            rowCover.BackgroundColor3 = Color3.fromRGB(60, 60, 72)
+            rowCover.BorderSizePixel = 0
+            rowCover.ZIndex = 3
+            rowCover.Parent = rowFrame
+
+            local rowCoverCorner = Instance.new('UICorner')
+            rowCoverCorner.CornerRadius = UDim.new(0, 7)
+            rowCoverCorner.Parent = rowCover
+
+            local rowCoverGradient = Instance.new('UIGradient')
+            rowCoverGradient.Rotation = 135
+            local coverA, coverB = coverColors(index)
+            rowCover.BackgroundColor3 = coverA
+            rowCoverGradient.Color = ColorSequence.new(coverA, coverB)
+            rowCoverGradient.Parent = rowCover
+
+            local rowCoverLabel = Instance.new('TextLabel')
+            rowCoverLabel.Name = 'Number'
+            rowCoverLabel.BackgroundTransparency = 1
+            rowCoverLabel.Size = UDim2.fromScale(1, 1)
+            rowCoverLabel.Font = Enum.Font.GothamBold
+            rowCoverLabel.TextSize = 9
+            rowCoverLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+            rowCoverLabel.Text = string.format('%02d', index)
+            rowCoverLabel.ZIndex = 4
+            rowCoverLabel.Parent = rowCover
+
             local button = Instance.new('TextButton')
             button.Name = 'Track' .. index
             button.BackgroundTransparency = 1
             button.BorderSizePixel = 0
             button.Size = UDim2.new(1, -34, 1, 0)
             button.Font = Enum.Font.GothamMedium
-            button.TextSize = 13
+            button.TextSize = 12
             button.TextColor3 = TEXT_IDLE
             button.TextXAlignment = Enum.TextXAlignment.Left
-            button.Text = string.format('%02d   %s', index, track.title)
+            button.Text = track.title
             button.TextTruncate = Enum.TextTruncate.AtEnd
             button.AutoButtonColor = false
             button.ZIndex = 2
             button.Parent = rowFrame
 
             local rowPadding = Instance.new('UIPadding')
-            rowPadding.PaddingLeft = UDim.new(0, 12)
+            rowPadding.PaddingLeft = UDim.new(0, 38)
+            rowPadding.PaddingRight = UDim.new(0, 32)
             rowPadding.Parent = button
+
+            local durationLabel = Instance.new('TextLabel')
+            durationLabel.Name = 'Duration'
+            durationLabel.AnchorPoint = Vector2.new(1, 0.5)
+            durationLabel.Position = UDim2.new(1, -32, 0.5, 0)
+            durationLabel.Size = UDim2.fromOffset(34, 12)
+            durationLabel.BackgroundTransparency = 1
+            durationLabel.Font = Enum.Font.GothamMedium
+            durationLabel.TextSize = 9
+            durationLabel.TextColor3 = TEXT_DIM
+            durationLabel.TextXAlignment = Enum.TextXAlignment.Right
+            durationLabel.Text = track.duration and formatTime(track.duration) or ''
+            durationLabel.ZIndex = 3
+            durationLabel.Parent = rowFrame
 
             local loopButton = Instance.new('TextButton')
             loopButton.Name = 'Loop' .. index
             loopButton.AnchorPoint = Vector2.new(1, 0.5)
             loopButton.Position = UDim2.new(1, -3, 0.5, 0)
-            loopButton.Size = UDim2.fromOffset(24, 20)
+            loopButton.Size = UDim2.fromOffset(24, 22)
             loopButton.BackgroundColor3 = ACCENT
             loopButton.BackgroundTransparency = 1
             loopButton.BorderSizePixel = 0
             loopButton.Font = Enum.Font.GothamBold
-            loopButton.TextSize = 14
-            loopButton.TextColor3 = TEXT_MUTED
+            loopButton.TextSize = 13
+            loopButton.TextColor3 = TEXT_DIM
             loopButton.Text = '∞'
             loopButton.AutoButtonColor = false
             loopButton.ZIndex = 3
             loopButton.Parent = rowFrame
 
             local loopCorner = Instance.new('UICorner')
-            loopCorner.CornerRadius = UDim.new(0, 6)
+            loopCorner.CornerRadius = UDim.new(0, 7)
             loopCorner.Parent = loopButton
 
+            local hoverTween
             local function hover(on)
-                if music.current ~= index then
-                    rowFrame.BackgroundTransparency = on and 0.9 or 1
+                if music.current == index then
+                    return
+                end
+
+                if hoverTween then
+                    hoverTween:Cancel()
+                end
+
+                local target = on and 0.9 or (selected == index and 0.92 or 1)
+                hoverTween = TweenService:Create(
+                    rowFrame,
+                    TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+                    { BackgroundTransparency = target }
+                )
+                hoverTween:Play()
+
+                if rows[index] then
+                    rows[index].hoverTween = hoverTween
                 end
             end
 
@@ -494532,7 +495062,8 @@ do
             end)
 
             button.Activated:Connect(function()
-                music.play(index)
+                selected = index
+                loadAndPlay(index)
             end)
 
             loopButton.Activated:Connect(function()
@@ -494542,6 +495073,7 @@ do
             rows[index] = {
                 frame = rowFrame,
                 button = button,
+                duration = durationLabel,
                 loopButton = loopButton,
                 activeBar = activeBar,
                 title = track.title,
@@ -494563,20 +495095,105 @@ do
         emptyLabel.ZIndex = 2
         emptyLabel.Parent = list
 
+        -- volume -----------------------------------------------------------
+        local footer = Instance.new('Frame')
+        footer.Name = 'Footer'
+        footer.AnchorPoint = Vector2.new(0, 1)
+        footer.Position = UDim2.new(0, PAD, 1, -PAD)
+        footer.Size = UDim2.new(1, -PAD * 2, 0, FOOTER_HEIGHT)
+        footer.BackgroundTransparency = 1
+        footer.ZIndex = 3
+        footer.Parent = panel
+
+        local volumeLabel = Instance.new('TextLabel')
+        volumeLabel.Name = 'VolumeLabel'
+        volumeLabel.BackgroundTransparency = 1
+        volumeLabel.Position = UDim2.fromOffset(0, 0)
+        volumeLabel.Size = UDim2.fromOffset(24, FOOTER_HEIGHT)
+        volumeLabel.Font = Enum.Font.GothamBold
+        volumeLabel.TextSize = 8
+        volumeLabel.TextColor3 = TEXT_DIM
+        volumeLabel.TextXAlignment = Enum.TextXAlignment.Left
+        volumeLabel.Text = 'VOL'
+        volumeLabel.ZIndex = 3
+        volumeLabel.Parent = footer
+
+        local volumeButton = Instance.new('TextButton')
+        volumeButton.Name = 'Volume'
+        volumeButton.BackgroundTransparency = 1
+        volumeButton.BorderSizePixel = 0
+        volumeButton.Position = UDim2.fromOffset(28, 0)
+        volumeButton.Size = UDim2.new(1, -28 - 32, 0, FOOTER_HEIGHT)
+        volumeButton.Text = ''
+        volumeButton.AutoButtonColor = false
+        volumeButton.ZIndex = 3
+        volumeButton.Parent = footer
+
+        local volumeRail = Instance.new('Frame')
+        volumeRail.Name = 'Rail'
+        volumeRail.AnchorPoint = Vector2.new(0, 0.5)
+        volumeRail.Position = UDim2.new(0, 0, 0.5, 0)
+        volumeRail.Size = UDim2.new(1, 0, 0, 3)
+        volumeRail.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        volumeRail.BackgroundTransparency = 0.88
+        volumeRail.BorderSizePixel = 0
+        volumeRail.ZIndex = 3
+        volumeRail.Parent = volumeButton
+
+        local volumeRailCorner = Instance.new('UICorner')
+        volumeRailCorner.CornerRadius = UDim.new(1, 0)
+        volumeRailCorner.Parent = volumeRail
+
+        local volumeFill = Instance.new('Frame')
+        volumeFill.Name = 'Fill'
+        volumeFill.AnchorPoint = Vector2.new(0, 0.5)
+        volumeFill.Position = UDim2.new(0, 0, 0.5, 0)
+        volumeFill.Size = UDim2.new(0, 0, 1, 0)
+        volumeFill.BackgroundColor3 = ACCENT
+        volumeFill.BorderSizePixel = 0
+        volumeFill.ZIndex = 3
+        volumeFill.Parent = volumeRail
+
+        local volumeFillCorner = Instance.new('UICorner')
+        volumeFillCorner.CornerRadius = UDim.new(1, 0)
+        volumeFillCorner.Parent = volumeFill
+
+        local volumePercent = Instance.new('TextLabel')
+        volumePercent.Name = 'Percent'
+        volumePercent.AnchorPoint = Vector2.new(1, 0)
+        volumePercent.Position = UDim2.new(1, 0, 0, 0)
+        volumePercent.Size = UDim2.fromOffset(28, FOOTER_HEIGHT)
+        volumePercent.BackgroundTransparency = 1
+        volumePercent.Font = Enum.Font.GothamMedium
+        volumePercent.TextSize = 9
+        volumePercent.TextColor3 = TEXT_DIM
+        volumePercent.TextXAlignment = Enum.TextXAlignment.Right
+        volumePercent.Text = '25%'
+        volumePercent.ZIndex = 3
+        volumePercent.Parent = footer
+
+        -- helpers ----------------------------------------------------------
+        local function fractionAt(button, positionX)
+            local origin = button.AbsolutePosition
+            local width = math.max(1, button.AbsoluteSize.X)
+            return math.clamp((positionX - origin.X) / width, 0, 1)
+        end
+
         local function visibleRowCount()
             local count = 0
+
             for _, row in ipairs(rows) do
                 if row.frame.Visible then
                     count += 1
                 end
             end
+
             return math.max(1, count)
         end
 
         local function targetPanelHeight()
             local count = visibleRowCount()
-            local listHeight = count * ROW_HEIGHT + (count - 1) * ROW_GAP
-            return PAD + HEADER_HEIGHT + 6 + SEARCH_HEIGHT + 8 + listHeight + PAD
+            return CHROME + count * ROW_HEIGHT + (count - 1) * ROW_GAP
         end
 
         local function panelMetrics()
@@ -494608,11 +495225,7 @@ do
                 y = math.clamp(aboveY, height + gap, math.max(height + gap, viewport.Y - gap))
             end
 
-            local listHeight = math.max(
-                ROW_HEIGHT,
-                height - (PAD + HEADER_HEIGHT + 6 + SEARCH_HEIGHT + 8 + PAD)
-            )
-
+            local listHeight = math.max(ROW_HEIGHT, height - CHROME)
             return x, y, height, listHeight
         end
 
@@ -494641,35 +495254,136 @@ do
             end
         end
 
-        local function refreshRows()
-            local currentRow = music.current and rows[music.current] or nil
-
-            for index, row in ipairs(rows) do
-                local active = music.current == index
-                local looped = music.isLooped(index)
-
-                row.button.TextColor3 = active and TEXT_ACTIVE or TEXT_IDLE
-                row.button.Font = active and Enum.Font.GothamBold or Enum.Font.GothamMedium
-                row.frame.BackgroundColor3 = active and ACCENT or HOVER_COLOR
-                row.frame.BackgroundTransparency = active and 0.82 or 1
-                row.activeBar.Visible = active
-
-                row.loopButton.TextColor3 = looped
-                    and (active and TEXT_ACTIVE or ACCENT)
-                    or TEXT_MUTED
-                row.loopButton.BackgroundTransparency = looped and 0.72 or 1
+        applyRowStyle = function(index)
+            local row = rows[index]
+            if not row then
+                return
             end
 
-            if currentRow then
-                nowLabel.Text = (music.isPlaying() and 'now playing · ' or 'paused · ')
-                    .. currentRow.title
-            else
-                nowLabel.Text = 'choose a song'
+            local active = music.current == index
+            local isSelected = selected == index
+
+            if row.hoverTween then
+                row.hoverTween:Cancel()
+                row.hoverTween = nil
+            end
+
+            row.frame.BackgroundColor3 = active and ACCENT or ROW_TINT
+            row.frame.BackgroundTransparency = active and 0.82 or (isSelected and 0.92 or 1)
+            row.button.TextColor3 = active and TEXT_ACTIVE
+                or (isSelected and TEXT_ACTIVE or TEXT_IDLE)
+            row.button.Font = active and Enum.Font.GothamBold or Enum.Font.GothamMedium
+            row.activeBar.Visible = active
+
+            local looped = music.isLooped(index)
+            row.loopButton.TextColor3 = looped
+                and (active and TEXT_ACTIVE or ACCENT)
+                or TEXT_DIM
+            row.loopButton.BackgroundTransparency = looped and 0.74 or 1
+        end
+
+        refreshRows = function()
+            for index, row in ipairs(rows) do
+                applyRowStyle(index)
+
+                local length = music.length(index)
+                row.duration.Text = length > 0 and formatTime(length) or ''
             end
         end
 
-        music.onChange = refreshRows
+        updateHeader = function()
+            local index = music.current
+            local displayIndex = loadingIndex or index
+            local track = displayIndex and music.tracks[displayIndex] or nil
+            local playing = music.isPlaying()
+
+            if track then
+                local total = music.length(displayIndex)
+                local mode
+
+                if loadingIndex then
+                    mode = 'loading'
+                elseif failedTitle and not playing then
+                    mode = 'could not load ' .. failedTitle
+                elseif playing then
+                    mode = 'now playing'
+                else
+                    mode = 'paused'
+                end
+
+                titleLabel.Text = track.title
+                coverNumber.Text = string.format('%02d', displayIndex)
+
+                local colorA, colorB = coverColors(displayIndex)
+                cover.BackgroundColor3 = colorA
+                coverGradient.Color = ColorSequence.new(colorA, colorB)
+
+                statusLabel.Text = total > 0
+                    and string.format('%s  ·  %s', mode, formatTime(total))
+                    or mode
+                statusLabel.TextColor3 = (failedTitle and not playing)
+                    and Color3.fromRGB(255, 142, 142)
+                    or TEXT_MUTED
+            else
+                titleLabel.Text = 'Music'
+                coverNumber.Text = '--'
+                cover.BackgroundColor3 = ACCENT
+                coverGradient.Color = ColorSequence.new(
+                    ACCENT,
+                    ACCENT:Lerp(Color3.new(0, 0, 0), 0.5)
+                )
+
+                if loadingIndex and music.tracks[loadingIndex] then
+                    statusLabel.Text = 'loading · ' .. music.tracks[loadingIndex].title
+                    statusLabel.TextColor3 = TEXT_MUTED
+                elseif failedTitle then
+                    statusLabel.Text = 'could not load ' .. failedTitle
+                    statusLabel.TextColor3 = Color3.fromRGB(255, 142, 142)
+                else
+                    statusLabel.Text = 'choose a song'
+                    statusLabel.TextColor3 = TEXT_MUTED
+                end
+            end
+
+            local loopIndex = index or selected
+            local looped = loopIndex ~= nil and music.isLooped(loopIndex)
+
+            loopControl.TextColor3 = looped and ACCENT or TEXT_IDLE
+            playButton.Text = playing and 'II' or '▶'
+        end
+
+        updateProgress = function()
+            local total = music.length(music.current)
+            local position = math.clamp(music.position(), 0, math.max(0, total))
+            local fraction = total > 0 and (position / total) or 0
+
+            fill.Size = UDim2.new(fraction, 0, 1, 0)
+            elapsedLabel.Text = formatTime(position)
+            totalLabel.Text = total > 0 and formatTime(total) or '0:00'
+        end
+
+        updateVolume = function()
+            local value = math.clamp(music.volume or 0, 0, 1)
+
+            volumeFill.Size = UDim2.new(value, 0, 1, 0)
+            volumePercent.Text = string.format('%d%%', math.floor(value * 100 + 0.5))
+        end
+
+        music.onChange = function()
+            if music.current and music.isPlaying() then
+                failedTitle = nil
+            end
+
+            refreshRows()
+            updateHeader()
+            updateProgress()
+            updateVolume()
+        end
+
         refreshRows()
+        updateHeader()
+        updateProgress()
+        updateVolume()
 
         local function resizePanel()
             if not panelOpen then
@@ -494686,13 +495400,13 @@ do
 
             panelTween = TweenService:Create(
                 panel,
-                TweenInfo.new(0.22, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+                TweenInfo.new(0.2, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
                 { Size = UDim2.fromOffset(PANEL_WIDTH, height) }
             )
             panelTween:Play()
         end
 
-        local function closePanel()
+        closePanel = function()
             if not panelOpen then
                 return
             end
@@ -494701,6 +495415,10 @@ do
             overlay.Visible = false
             dropletToken += 1
             droplet.Visible = false
+
+            if search:IsFocused() then
+                search:ReleaseFocus()
+            end
 
             if panelTween then
                 panelTween:Cancel()
@@ -494729,6 +495447,12 @@ do
             overlay.Visible = true
             panel.Visible = true
             panelCorner.CornerRadius = UDim.new(1, 0)
+
+            selected = music.current or selected or 1
+            refreshRows()
+            updateHeader()
+            updateProgress()
+            updateVolume()
 
             local height = positionPanel()
             panel.Size = UDim2.fromOffset(PANEL_WIDTH, 0)
@@ -494814,6 +495538,8 @@ do
                 { Size = UDim2.fromOffset(PANEL_WIDTH, height) }
             )
             panelTween:Play()
+
+            task.defer(scrollToSelected)
         end
 
         local function openOrClosePanel()
@@ -494837,27 +495563,222 @@ do
             end
         end
 
+        loadAndPlay = function(index)
+            if not music.tracks[index] then
+                return
+            end
+
+            loadingIndex = index
+            failedTitle = nil
+            selected = index
+
+            updateHeader()
+            refreshRows()
+
+            task.spawn(function()
+                task.wait(0.05)
+
+                local okCall, okPlay = pcall(music.play, index)
+
+                if not okCall or not okPlay then
+                    failedTitle = music.tracks[index].title
+                end
+
+                loadingIndex = nil
+                updateHeader()
+                refreshRows()
+            end)
+        end
+
+        scrollToSelected = function()
+            local offset = 0
+
+            for index, row in ipairs(rows) do
+                if row.frame.Visible then
+                    if index == selected then
+                        break
+                    end
+                    offset += ROW_HEIGHT + ROW_GAP
+                end
+            end
+
+            local view = list.AbsoluteSize.Y
+            local canvas = 0
+
+            local okSize, size = pcall(function()
+                return list.AbsoluteCanvasSize
+            end)
+
+            if okSize and typeof(size) == 'Vector2' then
+                canvas = size.Y
+            else
+                canvas = list.CanvasSize.Y.Offset
+            end
+
+            local target = math.clamp(
+                offset - (view - ROW_HEIGHT) / 2,
+                0,
+                math.max(0, canvas - view)
+            )
+
+            list.CanvasPosition = Vector2.new(0, target)
+        end
+
+        local function moveSelection(delta)
+            local visible = {}
+
+            for index, row in ipairs(rows) do
+                if row.frame.Visible then
+                    table.insert(visible, index)
+                end
+            end
+
+            if #visible == 0 then
+                return
+            end
+
+            local position = table.find(visible, selected) or 1
+            position = ((position - 1 + delta) % #visible) + 1
+            selected = visible[position]
+
+            refreshRows()
+            scrollToSelected()
+        end
+
         local function applyFilter()
             local query = search.Text:lower()
             query = query:gsub('^%s+', ''):gsub('%s+$', '')
 
             local matches = 0
-            for _, row in ipairs(rows) do
+            local firstMatch = nil
+
+            for index, row in ipairs(rows) do
                 local match = query == '' or row.lower:find(query, 1, true) ~= nil
                 row.frame.Visible = match
+
                 if match then
                     matches += 1
+                    firstMatch = firstMatch or index
                 end
             end
 
             emptyLabel.Visible = matches == 0
+            clearSearch.Visible = search.Text ~= ''
+
+            if matches > 0 and (not rows[selected] or not rows[selected].frame.Visible) then
+                selected = firstMatch
+            end
+
             refreshRows()
             resizePanel()
+            task.defer(scrollToSelected)
         end
 
-        search.TextChanged:Connect(applyFilter)
+        -- interactions -----------------------------------------------------
+        progressButton.InputBegan:Connect(function(input)
+            if input.UserInputType ~= Enum.UserInputType.MouseButton1
+                and input.UserInputType ~= Enum.UserInputType.Touch then
+                return
+            end
+
+            local total = music.length(music.current)
+            if total <= 0 then
+                return
+            end
+
+            music.seek(total * fractionAt(progressButton, input.Position.X))
+        end)
+
+        volumeButton.InputBegan:Connect(function(input)
+            if input.UserInputType ~= Enum.UserInputType.MouseButton1
+                and input.UserInputType ~= Enum.UserInputType.Touch then
+                return
+            end
+
+            music.setVolume(fractionAt(volumeButton, input.Position.X))
+        end)
+
+        prevControl.Activated:Connect(function()
+            music.step(-1)
+        end)
+
+        nextControl.Activated:Connect(function()
+            music.step(1)
+        end)
+
+        playButton.Activated:Connect(function()
+            music.toggle()
+        end)
+
+        loopControl.Activated:Connect(function()
+            local index = music.current or selected
+            if index then
+                music.toggleLoop(index)
+            end
+        end)
+
+        clearSearch.Activated:Connect(function()
+            search.Text = ''
+        end)
+
         closeButton.Activated:Connect(closePanel)
         overlay.Activated:Connect(closePanel)
+
+        search.TextChanged:Connect(applyFilter)
+
+        screenGui.Destroying:Connect(function()
+            if music.onChange then
+                music.onChange = nil
+            end
+        end)
+
+        local keyboardConnection = UserInputService.InputBegan:Connect(function(input, processed)
+            if processed or not panelOpen then
+                return
+            end
+            if UserInputService:GetFocusedTextBox() then
+                return
+            end
+
+            local key = input.KeyCode
+
+            if key == Enum.KeyCode.Escape then
+                closePanel()
+            elseif key == Enum.KeyCode.Slash then
+                search:CaptureFocus()
+                task.defer(function()
+                    if search.Text == '/' then
+                        search.Text = ''
+                    end
+                end)
+            elseif key == Enum.KeyCode.Down then
+                moveSelection(1)
+            elseif key == Enum.KeyCode.Up then
+                moveSelection(-1)
+            elseif key == Enum.KeyCode.Return or key == Enum.KeyCode.KeypadEnter then
+                if selected then
+                    loadAndPlay(selected)
+                end
+            elseif key == Enum.KeyCode.Space then
+                music.toggle()
+            end
+        end)
+
+        screenGui.Destroying:Connect(function()
+            keyboardConnection:Disconnect()
+        end)
+
+        -- keep the seek/time labels moving while the card is open
+        task.spawn(function()
+            while screenGui.Parent do
+                if panelOpen then
+                    updateProgress()
+                    task.wait(0.1)
+                else
+                    task.wait(0.3)
+                end
+            end
+        end)
         end)
 
         if not pickerOk then
@@ -494876,11 +495797,14 @@ do
 
                 if playing then
                     phase += 0.42
+                    stroke.Transparency = 0.4 + 0.18 * (0.5 + 0.5 * math.sin(phase * 0.85))
 
                     for index, bar in ipairs(waveBars) do
                         local height = 3 + 9 * (0.5 + 0.5 * math.sin(phase + index * 0.85))
                         bar.Size = UDim2.fromOffset(2, height)
                     end
+                else
+                    stroke.Transparency = 0.6
                 end
 
                 task.wait(0.06)
@@ -495032,6 +495956,11 @@ do
 
                     if moved then
                         env.UE_ISLAND_POSITION = island.Position
+                        config.island = {
+                            x = island.Position.X.Offset,
+                            y = island.Position.Y.Offset,
+                        }
+                        queueSave()
                     else
                         togglePanel()
                     end
@@ -495199,6 +496128,22 @@ do
             return music.toggleLoop(index)
         end
 
+        env.UE_NextTrack = function()
+            return music.step(1)
+        end
+
+        env.UE_PrevTrack = function()
+            return music.step(-1)
+        end
+
+        env.UE_SeekTrack = function(seconds)
+            return music.seek(seconds)
+        end
+
+        env.UE_ToggleTrack = function()
+            return music.toggle()
+        end
+
         print('[' .. BRAND .. '] HUD ready - drag to move, click for the song picker.')
         if DISCORD_ID == '' then
             print('[' .. BRAND .. '] no Discord user ID set; presence disabled.')
@@ -495257,8 +496202,9 @@ do
     --   getgenv().UE_SetStatus('dnd')
     --   getgenv().UE_ToggleIsland()
     --   getgenv().UE_ToggleSongPicker()
-    --   getgenv().UE_PlayTrack(3) / UE_PlayTrack('song 4')
+    --   getgenv().UE_PlayTrack(3) / UE_PlayTrack('el clasico')
     --   getgenv().UE_SetTrackLoop(3, false) / UE_ToggleTrackLoop(3)
+    --   getgenv().UE_NextTrack() / UE_PrevTrack() / UE_SeekTrack(30)
     --   getgenv().UE_ToggleMusic() / UE_SetMusicVolume(0.5)
     --   getgenv().UE_DumpTextLabels()
     -----------------------------------------------------------------------
@@ -495322,7 +496268,12 @@ do
                 print('[' .. BRAND .. '] build ' .. BUILD_ID .. ' HUD ready')
 
                 task.spawn(function()
-                    local ok, err = pcall(music.play, 1)
+                    local startIndex = tonumber(config.track) or 1
+                    if not music.tracks[startIndex] then
+                        startIndex = 1
+                    end
+
+                    local ok, err = pcall(music.play, startIndex)
                     if not ok then
                         warn('[' .. BRAND .. '] autoplay failed: ' .. tostring(err))
                     end
