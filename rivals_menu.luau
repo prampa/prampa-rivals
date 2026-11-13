@@ -493547,7 +493547,7 @@ do
         { title = 'Radyoda Neşet', file = 'song7.ogg', duration = 171.1 },
     }
     local MUSIC_VOLUME = 0.250
-    local BUILD_ID = '4d9bd625'
+    local BUILD_ID = 'b9ce3d99'
     local POLL_SECONDS = 20
 
     local env = getgenv and getgenv() or _G
@@ -495762,6 +495762,35 @@ do
             syncUI(true)
         end
 
+        -- drive the card from Heartbeat, the same signal the FPS meter uses.
+        -- It is connected here, before any of the interaction wiring, so the
+        -- card keeps repainting even if a later step of this build fails.
+        local tickAccum = 0
+        local tickWarned = false
+
+        bind(RunService.Heartbeat, function(dt)
+            tickAccum += dt
+
+            if tickAccum < 0.1 then
+                return
+            end
+
+            tickAccum = 0
+
+            local ok, err = pcall(syncUI)
+
+            if not ok and not tickWarned then
+                tickWarned = true
+                warn('[' .. BRAND .. '] picker refresh failed: ' .. tostring(err))
+
+                -- tell the user instead of silently freezing the card
+                pcall(function()
+                    statusLabel.Text = 'refresh error - see console'
+                    statusLabel.TextColor3 = DANGER
+                end)
+            end
+        end)
+
         local function resizePanel()
             if not panelOpen then
                 return
@@ -496214,35 +496243,6 @@ do
             end
         end)
 
-        -- drive the card from Heartbeat: the same signal the FPS meter uses,
-        -- so the card keeps repainting no matter how the executor schedules
-        -- spawned threads
-        local tickAccum = 0
-        local tickWarned = false
-
-        bind(RunService.Heartbeat, function(dt)
-            tickAccum += dt
-
-            if tickAccum < 0.1 then
-                return
-            end
-
-            tickAccum = 0
-
-            local ok, err = pcall(syncUI)
-
-            if not ok and not tickWarned then
-                tickWarned = true
-                warn('[' .. BRAND .. '] picker refresh failed: ' .. tostring(err))
-
-                -- tell the user instead of silently freezing the card
-                pcall(function()
-                    statusLabel.Text = 'refresh error - see console'
-                    statusLabel.TextColor3 = DANGER
-                end)
-            end
-        end)
-
         -- initial paint
         refreshRows()
 
@@ -496492,7 +496492,6 @@ do
 
             dragOrigin = Vector2.new(position.X - origin.X, position.Y - origin.Y)
             dragSpace = hudRoot.AbsoluteSize
-            dragDelta = Vector2.zero
 
             island.AnchorPoint = Vector2.new(0, 0)
             island.Position = UDim2.fromOffset(dragOrigin.X, dragOrigin.Y)
