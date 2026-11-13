@@ -493547,7 +493547,7 @@ do
         { title = 'Radyoda Neşet', file = 'song7.ogg', duration = 171.1 },
     }
     local MUSIC_VOLUME = 0.250
-    local BUILD_ID = '5abc1c6e'
+    local BUILD_ID = '4d9bd625'
     local POLL_SECONDS = 20
 
     local env = getgenv and getgenv() or _G
@@ -494525,12 +494525,15 @@ do
         -- now playing: the track name in the island plus a hairline of progress
         local songLabel = makeLabel('SongLabel', '', ACCENT, 3)
         songLabel.TextSize = 12
-        -- a fixed width keeps a very long title from stretching the island
-        -- across the screen; anything longer is truncated with an ellipsis
-        songLabel.AutomaticSize = Enum.AutomaticSize.None
-        songLabel.Size = UDim2.fromOffset(140, 20)
+        -- grow with the title (no dead space after short names) but never past
+        -- the cap, which keeps a long title from stretching the island
+        songLabel.AutomaticSize = Enum.AutomaticSize.X
         songLabel.TextTruncate = Enum.TextTruncate.AtEnd
         songLabel.Visible = false
+
+        local songLimit = Instance.new('UISizeConstraint')
+        songLimit.MaxSize = Vector2.new(150, 20)
+        songLimit.Parent = songLabel
 
         -- the hairline lives outside the island: a UIListLayout would place any
         -- direct child in the row instead of letting it sit on the bottom edge
@@ -494663,7 +494666,6 @@ do
         local togglePanel = function() end
         local syncPanel = function() end
         local closePanel = function() end
-        local pickerSync = function() end
 
         local pickerOk, pickerError = pcall(function()
 
@@ -494717,7 +494719,6 @@ do
         local loadAndPlay
         local scrollToSelected
         local syncUI
-        local seekToPosition
 
         local connections = {}
         local function bind(signal, handler)
@@ -495504,7 +495505,7 @@ do
             local aboveBottom = islandY - gap
             local spaceBelow = guiHeight - gap - belowTop
             local spaceAbove = aboveBottom - gap
-            local minimum = math.min(content, CHROME + (ROW_HEIGHT + ROW_GAP) * 3)
+            local minimum = CHROME + (ROW_HEIGHT + ROW_GAP) * 3
 
             local below
             if spaceBelow >= minimum and spaceAbove >= minimum then
@@ -495734,13 +495735,11 @@ do
             return table.concat(bits, '|')
         end
 
-        -- the card repaints itself from that loop, not from a callback, so a
-        -- missed event can never leave the controls showing stale state
+        -- the card repaints itself from a Heartbeat tick, so its controls stay
+        -- live even when a change callback is missed.  It deliberately does not
+        -- depend on panelOpen: while the card is hidden this is a few cheap
+        -- assignments, and it can never get stuck showing stale state.
         syncUI = function(force)
-            if not panelOpen then
-                return
-            end
-
             local signature = currentSignature()
             if force or signature ~= lastSignature then
                 lastSignature = signature
@@ -495758,21 +495757,9 @@ do
                 failedTitle = nil
             end
 
-            syncUI()
-        end
-
-        seekToPosition = function(positionX)
-            local total = music.length(music.current)
-            if total <= 0 then
-                return
-            end
-
-            scrubFraction = fractionAt(progressButton, positionX)
-            fill.Size = UDim2.new(scrubFraction, 0, 1, 0)
-            elapsedLabel.Text = formatTime(total * scrubFraction)
-
-            -- a click jumps straight away; dragging only commits on release
-            music.seek(total * scrubFraction)
+            -- force a full repaint: a change that arrives here has to be
+            -- visible right away, not on the next tick
+            syncUI(true)
         end
 
         local function resizePanel()
@@ -495796,63 +495783,6 @@ do
             panelTween:Play()
         end
 
-        -- the game hides the mouse icon while you play, which leaves an
-        -- invisible cursor over the card; force it back while we are open
-        local savedIcon = nil
-        local savedBehavior = nil
-        local cursorToken = 0
-
-        local function acquireCursor()
-            if savedIcon == nil then
-                savedIcon = UserInputService.MouseIconEnabled
-                savedBehavior = UserInputService.MouseBehavior
-            end
-
-            pcall(function()
-                UserInputService.MouseIconEnabled = true
-            end)
-
-            cursorToken += 1
-            local token = cursorToken
-
-            task.spawn(function()
-                while token == cursorToken and panelOpen do
-                    if not UserInputService.MouseIconEnabled then
-                        pcall(function()
-                            UserInputService.MouseIconEnabled = true
-                        end)
-                    end
-
-                    if UserInputService.MouseBehavior ~= Enum.MouseBehavior.Default then
-                        pcall(function()
-                            UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-                        end)
-                    end
-
-                    task.wait(0.2)
-                end
-            end)
-        end
-
-        local function releaseCursor()
-            cursorToken += 1
-
-            if savedIcon ~= nil then
-                pcall(function()
-                    UserInputService.MouseIconEnabled = savedIcon
-                end)
-            end
-
-            if savedBehavior ~= nil then
-                pcall(function()
-                    UserInputService.MouseBehavior = savedBehavior
-                end)
-            end
-
-            savedIcon = nil
-            savedBehavior = nil
-        end
-
         closePanel = function()
             if not panelOpen then
                 return
@@ -495862,7 +495792,6 @@ do
             overlay.Visible = false
             dropletToken += 1
             droplet.Visible = false
-            releaseCursor()
 
             if search:IsFocused() then
                 search:ReleaseFocus()
@@ -495895,7 +495824,6 @@ do
             overlay.Visible = true
             panel.Visible = true
             panelCorner.CornerRadius = UDim.new(1, 0)
-            acquireCursor()
 
             selected = music.current or selected or 1
             lastSignature = nil
@@ -496147,8 +496075,12 @@ do
                 return
             end
 
+            -- a click jumps straight away; a drag previews and commits on
+            -- release, so the audio does not stutter while scrubbing
             scrubbing = true
-            seekToPosition(input.Position.X)
+            previewScrub(input.Position.X)
+            commitScrub()
+            syncUI(true)
         end)
 
         bind(volumeButton.InputBegan, function(input)
@@ -496189,16 +496121,21 @@ do
             volumeDragging = false
         end)
 
+        -- every control repaints the card itself as well as relying on the
+        -- engine callback, so a click is always visible immediately
         bind(prevControl.Activated, function()
             music.step(-1)
+            syncUI(true)
         end)
 
         bind(nextControl.Activated, function()
             music.step(1)
+            syncUI(true)
         end)
 
         bind(playButton.Activated, function()
             music.toggle()
+            syncUI(true)
         end)
 
         bind(loopControl.Activated, function()
@@ -496206,14 +496143,17 @@ do
             if index then
                 music.toggleLoop(index)
             end
+            syncUI(true)
         end)
 
         bind(shuffleControl.Activated, function()
             music.toggleShuffle()
+            syncUI(true)
         end)
 
         bind(volumeLabel.Activated, function()
             music.toggleMute()
+            syncUI(true)
         end)
 
         bind(clearSearch.Activated, function()
@@ -496274,6 +496214,35 @@ do
             end
         end)
 
+        -- drive the card from Heartbeat: the same signal the FPS meter uses,
+        -- so the card keeps repainting no matter how the executor schedules
+        -- spawned threads
+        local tickAccum = 0
+        local tickWarned = false
+
+        bind(RunService.Heartbeat, function(dt)
+            tickAccum += dt
+
+            if tickAccum < 0.1 then
+                return
+            end
+
+            tickAccum = 0
+
+            local ok, err = pcall(syncUI)
+
+            if not ok and not tickWarned then
+                tickWarned = true
+                warn('[' .. BRAND .. '] picker refresh failed: ' .. tostring(err))
+
+                -- tell the user instead of silently freezing the card
+                pcall(function()
+                    statusLabel.Text = 'refresh error - see console'
+                    statusLabel.TextColor3 = DANGER
+                end)
+            end
+        end)
+
         -- initial paint
         refreshRows()
 
@@ -496286,25 +496255,6 @@ do
                 music.onChange = nil
             end
         end)
-
-        pickerSync = syncUI
-        end)
-
-        -- the card refreshes itself from here, so its controls stay live even
-        -- when a change callback is missed
-        task.spawn(function()
-            local warned = false
-
-            while screenGui.Parent do
-                local ok, err = pcall(pickerSync)
-
-                if not ok and not warned then
-                    warned = true
-                    warn('[' .. BRAND .. '] picker refresh failed: ' .. tostring(err))
-                end
-
-                task.wait(0.1)
-            end
         end)
 
         if not pickerOk then
@@ -496514,76 +496464,116 @@ do
         end
 
         -- dragging + collapse --------------------------------------------
-        --   the island is only converted to an offset position once the
-        --   pointer has actually moved, so a plain click can never make it
-        --   jump to a corner before the panel opens
+        --   a press only becomes a drag once the pointer really moved, so a
+        --   plain click opens the card instead.  The island is switched to an
+        --   offset position *and* pinned to where it already is in the same
+        --   step, so the anchor change can never make it jump.
         local dragging = false
         local moved = false
-        local dragStart = Vector2.zero
-        local startAbs = Vector2.zero
+        local dragOrigin = Vector2.zero
+        local dragDelta = Vector2.zero
+        local dragSpace = Vector2.zero
+        local touchStart = nil
+
+        local function pointerDelta(input, isTouch)
+            if isTouch then
+                return Vector2.new(input.Position.X, input.Position.Y) - touchStart
+            end
+
+            -- relative movement keeps working while the game has the mouse
+            -- locked to the middle of the screen; absolute positions do not
+            return dragDelta + Vector2.new(input.Delta.X, input.Delta.Y)
+        end
+
+        local function beginDrag()
+            -- absolute screen position -> gui-space offset, without moving
+            local origin = hudRoot.AbsolutePosition
+            local position = island.AbsolutePosition
+
+            dragOrigin = Vector2.new(position.X - origin.X, position.Y - origin.Y)
+            dragSpace = hudRoot.AbsoluteSize
+            dragDelta = Vector2.zero
+
+            island.AnchorPoint = Vector2.new(0, 0)
+            island.Position = UDim2.fromOffset(dragOrigin.X, dragOrigin.Y)
+        end
+
+        local function moveDrag()
+            local size = island.AbsoluteSize
+
+            local x = math.clamp(
+                dragOrigin.X + dragDelta.X,
+                0,
+                math.max(0, dragSpace.X - size.X)
+            )
+            local y = math.clamp(
+                dragOrigin.Y + dragDelta.Y,
+                0,
+                math.max(0, dragSpace.Y - size.Y)
+            )
+
+            island.Position = UDim2.fromOffset(x, y)
+            syncPanel()
+        end
 
         island.InputBegan:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1
-                or input.UserInputType == Enum.UserInputType.Touch then
-                dragging = true
-                moved = false
-                dragStart = input.Position
-                startAbs = island.AbsolutePosition
-
-                local connection
-                connection = input.Changed:Connect(function()
-                    if input.UserInputState ~= Enum.UserInputState.End then
-                        return
-                    end
-
-                    dragging = false
-
-                    if connection then
-                        connection:Disconnect()
-                    end
-
-                    if moved then
-                        env.UE_ISLAND_POSITION = island.Position
-                        config.island = {
-                            x = island.Position.X.Offset,
-                            y = island.Position.Y.Offset,
-                        }
-                        queueSave()
-                    else
-                        togglePanel()
-                    end
-                end)
+            if input.UserInputType ~= Enum.UserInputType.MouseButton1
+                and input.UserInputType ~= Enum.UserInputType.Touch then
+                return
             end
+
+            dragging = true
+            moved = false
+            touchStart = Vector2.new(input.Position.X, input.Position.Y)
+
+            local connection
+            connection = input.Changed:Connect(function()
+                if input.UserInputState ~= Enum.UserInputState.End then
+                    return
+                end
+
+                dragging = false
+
+                if connection then
+                    connection:Disconnect()
+                end
+
+                if moved then
+                    env.UE_ISLAND_POSITION = island.Position
+                    config.island = {
+                        x = island.Position.X.Offset,
+                        y = island.Position.Y.Offset,
+                    }
+                    queueSave()
+                else
+                    togglePanel()
+                end
+            end)
         end)
 
         UserInputService.InputChanged:Connect(function(input)
             if not dragging then
                 return
             end
-            if input.UserInputType ~= Enum.UserInputType.MouseMovement
-                and input.UserInputType ~= Enum.UserInputType.Touch then
+
+            local isTouch = input.UserInputType == Enum.UserInputType.Touch
+
+            if not isTouch and input.UserInputType ~= Enum.UserInputType.MouseMovement then
                 return
             end
 
-            local delta = input.Position - dragStart
-            if not moved and delta.Magnitude < 5 then
-                return
-            end
+            dragDelta = pointerDelta(input, isTouch)
 
             if not moved then
+                if dragDelta.Magnitude < 5 then
+                    return
+                end
+
                 moved = true
-                island.AnchorPoint = Vector2.new(0, 0)
+                beginDrag()
             end
 
-            local camera = workspace.CurrentCamera
-            local viewport = camera and camera.ViewportSize or Vector2.new(1920, 1080)
-            local size = island.AbsoluteSize
-
-            local x = math.clamp(startAbs.X + delta.X, 0, math.max(0, viewport.X - size.X))
-            local y = math.clamp(startAbs.Y + delta.Y, 0, math.max(0, viewport.Y - size.Y))
-
-            island.Position = UDim2.fromOffset(x, y)
-            syncPanel()
+            moveDrag()
         end)
 
         -- fps ------------------------------------------------------------
