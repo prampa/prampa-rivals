@@ -493547,7 +493547,7 @@ do
         { title = 'Radyoda Neşet', file = 'song7.ogg', duration = 171.1 },
     }
     local MUSIC_VOLUME = 0.250
-    local BUILD_ID = '7b35a239'
+    local BUILD_ID = '5abc1c6e'
     local POLL_SECONDS = 20
 
     local env = getgenv and getgenv() or _G
@@ -493945,8 +493945,20 @@ do
         assets = {},
         loop = {},
         volume = math.clamp(tonumber(config.volume) or MUSIC_VOLUME, 0, 1),
+        -- mute is deliberately session-only: a saved mute would look like
+        -- broken audio on the next load
+        muted = false,
+        shuffle = config.shuffle == true,
         fadeToken = 0,
     }
+
+    -- what the Sound should actually be at right now
+    function music.level()
+        if music.muted then
+            return 0
+        end
+        return music.volume
+    end
 
     -- restore per-track loop settings (saved as a dense 1-based array)
     if type(config.loop) == 'table' then
@@ -493996,7 +494008,7 @@ do
         local sound = Instance.new('Sound')
         sound.Name = 'prampa_Music'
         sound.Looped = false
-        sound.Volume = music.volume
+        sound.Volume = music.level()
         sound.Parent = SoundService
 
         music.sound = sound
@@ -494005,9 +494017,9 @@ do
         sound.Ended:Connect(function()
             -- a song that finished with its loop off rolls on to the next
             if music.current and not music.isLooped(music.current) then
-                local nextIndex = music.current + 1
+                local nextIndex = music.nextIndex(1)
 
-                if nextIndex <= #music.tracks then
+                if nextIndex then
                     music.play(nextIndex)
                     return
                 end
@@ -494121,14 +494133,30 @@ do
         return true
     end
 
-    function music.step(delta)
+    function music.nextIndex(delta)
         local count = #music.tracks
         if count == 0 then
-            return false
+            return nil
         end
 
         if not music.current then
-            return music.play(1)
+            return 1
+        end
+
+        delta = delta or 1
+
+        -- shuffle only changes what comes *next*; going back stays literal
+        if delta > 0 and music.shuffle and count > 1 then
+            local pick = music.current
+
+            for _ = 1, 16 do
+                pick = math.random(1, count)
+                if pick ~= music.current then
+                    break
+                end
+            end
+
+            return pick
         end
 
         local target = music.current + delta
@@ -494138,7 +494166,24 @@ do
             target = 1
         end
 
+        return target
+    end
+
+    function music.step(delta)
+        local target = music.nextIndex(delta)
+        if not target then
+            return false
+        end
+
         return music.play(target)
+    end
+
+    function music.seekBy(delta)
+        if not music.current then
+            return false
+        end
+
+        return music.seek(music.position() + (tonumber(delta) or 0))
     end
 
     function music.play(index)
@@ -494153,7 +494198,7 @@ do
             music.sound.TimePosition = 0
             music.sound.Volume = 0
             music.sound:Play()
-            music.fadeTo(music.volume, 0.2)
+            music.fadeTo(music.level(), 0.2)
 
             if music.onChange then
                 music.onChange()
@@ -494182,7 +494227,7 @@ do
         music.sound:Play()
 
         music.current = index
-        music.fadeTo(music.volume, 0.25)
+        music.fadeTo(music.level(), 0.25)
 
         config.track = index
         queueSave()
@@ -494202,7 +494247,7 @@ do
         if music.sound.IsPlaying then
             music.fadeTo(0, 0.14, function()
                 music.sound:Pause()
-                music.sound.Volume = music.volume
+                music.sound.Volume = music.level()
 
                 if music.onChange then
                     music.onChange()
@@ -494211,7 +494256,7 @@ do
         elseif music.current then
             music.sound.Volume = 0
             music.sound:Play()
-            music.fadeTo(music.volume, 0.2)
+            music.fadeTo(music.level(), 0.2)
         elseif #music.tracks > 0 then
             music.play(1)
         end
@@ -494230,10 +494275,11 @@ do
         end
 
         music.volume = math.clamp(number, 0, 1)
+        music.muted = false
         music.fadeToken += 1
 
         if music.sound then
-            music.sound.Volume = music.volume
+            music.sound.Volume = music.level()
         end
 
         config.volume = music.volume
@@ -494244,6 +494290,41 @@ do
         end
 
         return music.volume
+    end
+
+    function music.setMuted(value)
+        music.muted = value and true or false
+        music.fadeToken += 1
+
+        if music.sound then
+            music.sound.Volume = music.level()
+        end
+
+        if music.onChange then
+            music.onChange()
+        end
+
+        return music.muted
+    end
+
+    function music.toggleMute()
+        return music.setMuted(not music.muted)
+    end
+
+    function music.setShuffle(value)
+        music.shuffle = value and true or false
+        config.shuffle = music.shuffle
+        queueSave()
+
+        if music.onChange then
+            music.onChange()
+        end
+
+        return music.shuffle
+    end
+
+    function music.toggleShuffle()
+        return music.setShuffle(not music.shuffle)
     end
 
     -----------------------------------------------------------------------
@@ -494258,6 +494339,18 @@ do
         screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
         screenGui.DisplayOrder = 999999
         screenGui.Parent = guiParent()
+
+        -- full-size transparent frame: its AbsolutePosition is the gui origin,
+        -- which is the only reliable way to turn an absolute screen position
+        -- into a child offset when the executor applies its own inset
+        local hudRoot = Instance.new('Frame')
+        hudRoot.Name = 'HudRoot'
+        hudRoot.BackgroundTransparency = 1
+        hudRoot.BorderSizePixel = 0
+        hudRoot.Size = UDim2.fromScale(1, 1)
+        hudRoot.Position = UDim2.fromOffset(0, 0)
+        hudRoot.ZIndex = 0
+        hudRoot.Parent = screenGui
 
         local island = Instance.new('Frame')
         island.Name = 'Island'
@@ -494420,14 +494513,146 @@ do
             return sep
         end
 
-        local sep1 = makeSeparator(3)
-        local fpsLabel = makeLabel('FPSLabel', '0 FPS', Color3.fromRGB(220, 220, 230), 4)
-        local sep2 = makeSeparator(5)
-        local pingLabel = makeLabel('PingLabel', '-- MS', Color3.fromRGB(220, 220, 230), 6)
-        local sep3 = makeSeparator(7)
-        local uptimeLabel = makeLabel('UptimeLabel', '00:00', Color3.fromRGB(170, 170, 182), 8)
-        local sep4 = makeSeparator(9)
-        local clockLabel = makeLabel('ClockLabel', '--:--', Color3.fromRGB(170, 170, 182), 10)
+        local sep1 = makeSeparator(4)
+        local fpsLabel = makeLabel('FPSLabel', '0 FPS', Color3.fromRGB(220, 220, 230), 5)
+        local sep2 = makeSeparator(6)
+        local pingLabel = makeLabel('PingLabel', '-- MS', Color3.fromRGB(220, 220, 230), 7)
+        local sep3 = makeSeparator(8)
+        local uptimeLabel = makeLabel('UptimeLabel', '00:00', Color3.fromRGB(170, 170, 182), 9)
+        local sep4 = makeSeparator(10)
+        local clockLabel = makeLabel('ClockLabel', '--:--', Color3.fromRGB(170, 170, 182), 11)
+
+        -- now playing: the track name in the island plus a hairline of progress
+        local songLabel = makeLabel('SongLabel', '', ACCENT, 3)
+        songLabel.TextSize = 12
+        -- a fixed width keeps a very long title from stretching the island
+        -- across the screen; anything longer is truncated with an ellipsis
+        songLabel.AutomaticSize = Enum.AutomaticSize.None
+        songLabel.Size = UDim2.fromOffset(140, 20)
+        songLabel.TextTruncate = Enum.TextTruncate.AtEnd
+        songLabel.Visible = false
+
+        -- the hairline lives outside the island: a UIListLayout would place any
+        -- direct child in the row instead of letting it sit on the bottom edge
+        local progressTrack = Instance.new('Frame')
+        progressTrack.Name = 'IslandProgressTrack'
+        progressTrack.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        progressTrack.BackgroundTransparency = 0.88
+        progressTrack.BorderSizePixel = 0
+        progressTrack.Size = UDim2.fromOffset(0, 2)
+        progressTrack.ZIndex = 11
+        progressTrack.Visible = false
+        progressTrack.Parent = screenGui
+
+        local trackCorner = Instance.new('UICorner')
+        trackCorner.CornerRadius = UDim.new(1, 0)
+        trackCorner.Parent = progressTrack
+
+        local progressLine = Instance.new('Frame')
+        progressLine.Name = 'IslandProgress'
+        progressLine.BackgroundColor3 = ACCENT
+        progressLine.BackgroundTransparency = 0.12
+        progressLine.BorderSizePixel = 0
+        progressLine.Size = UDim2.fromOffset(0, 2)
+        progressLine.ZIndex = 12
+        progressLine.Visible = false
+        progressLine.Parent = screenGui
+
+        local lineCorner = Instance.new('UICorner')
+        lineCorner.CornerRadius = UDim.new(1, 0)
+        lineCorner.Parent = progressLine
+
+        -- the island is automatic-width, so on small screens the stats are
+        -- dropped one at a time until it fits again
+        local islandGroups = {
+            { clockLabel, sep4 },
+            { uptimeLabel, sep3 },
+            { pingLabel, sep2 },
+            { fpsLabel, sep1 },
+        }
+        local islandFitToken = 0
+        local songAllowed = true
+        local compactPresence = false
+        local redrawPresence = function() end
+        local fitSignature = nil
+
+        -- applying a fit is instant and does not repaint the row, so it can be
+        -- reused whenever the content has not changed.  That keeps the polling
+        -- loop from flashing the stats on and off every couple of seconds.
+        local function applyFit(hiddenGroups, compact, song)
+            for index, item in ipairs(islandGroups) do
+                local visible = index > hiddenGroups
+                item[1].Visible = visible
+                item[2].Visible = visible
+            end
+
+            if compactPresence ~= compact then
+                compactPresence = compact
+                redrawPresence()
+            end
+
+            songAllowed = song
+            songLabel.Visible = song and music.current ~= nil
+        end
+
+        local function fitIsland()
+            islandFitToken += 1
+            local token = islandFitToken
+
+            task.spawn(function()
+                local camera = workspace.CurrentCamera
+                local viewport = camera and camera.ViewportSize or Vector2.new(1920, 1080)
+                local limit = math.max(180, viewport.X - 26)
+
+                local current = music.current
+                local track = current and music.tracks[current] or nil
+                local signature = tostring(nameLabel.Text) .. '|'
+                    .. (track and track.title or '') .. '|'
+                    .. tostring(math.floor(viewport.X))
+
+                if signature == fitSignature then
+                    return
+                end
+
+                -- measure from the most complete state, then drop pieces until
+                -- the island fits inside the screen
+                applyFit(0, false, true)
+                task.wait()
+
+                local hidden = 0
+                for _ = 1, #islandGroups do
+                    if token ~= islandFitToken then
+                        return
+                    end
+                    if island.AbsoluteSize.X <= limit then
+                        break
+                    end
+
+                    hidden += 1
+                    applyFit(hidden, false, true)
+                    task.wait()
+                end
+
+                local compact = false
+
+                if token == islandFitToken and island.AbsoluteSize.X > limit then
+                    compact = true
+                    applyFit(hidden, true, true)
+                    task.wait()
+                end
+
+                local song = true
+
+                if token == islandFitToken and island.AbsoluteSize.X > limit then
+                    song = false
+                    applyFit(hidden, compact, false)
+                end
+
+                if token == islandFitToken then
+                    fitSignature = signature
+                end
+            end)
+        end
 
         -----------------------------------------------------------------------
         -- song picker (opens instead of collapsing the island)
@@ -494438,6 +494663,7 @@ do
         local togglePanel = function() end
         local syncPanel = function() end
         local closePanel = function() end
+        local pickerSync = function() end
 
         local pickerOk, pickerError = pcall(function()
 
@@ -494459,6 +494685,7 @@ do
         local TEXT_MUTED = Color3.fromRGB(142, 142, 158)
         local TEXT_DIM = Color3.fromRGB(114, 114, 130)
         local ROW_TINT = Color3.fromRGB(255, 255, 255)
+        local DANGER = Color3.fromRGB(255, 142, 142)
 
         local panelOpen = false
         local panelTween
@@ -494467,6 +494694,17 @@ do
         local selected = music.current or 1
         local loadingIndex = nil
         local failedTitle = nil
+        local eqPhase = 0
+        local scrubbing = false
+        local scrubFraction = nil
+        local volumeDragging = false
+
+        -- a full-screen invisible frame: its AbsolutePosition is the gui
+        -- origin, which is the only reliable way to convert the island's
+        -- screen position into a child offset (the gui inset moves one but
+        -- not the other depending on executor settings).  hudRoot already
+        -- serves that purpose, so the card reuses it.
+        local root = hudRoot
 
         -- forward declarations: row handlers are connected before the
         -- implementations below exist
@@ -494475,8 +494713,23 @@ do
         local updateHeader
         local updateProgress
         local updateVolume
+        local animateRows
         local loadAndPlay
         local scrollToSelected
+        local syncUI
+        local seekToPosition
+
+        local connections = {}
+        local function bind(signal, handler)
+            local connection = signal:Connect(handler)
+            connections[#connections + 1] = connection
+            return connection
+        end
+
+        local function isPrimary(input)
+            return input.UserInputType == Enum.UserInputType.MouseButton1
+                or input.UserInputType == Enum.UserInputType.Touch
+        end
 
         local function formatTime(seconds)
             seconds = math.max(0, math.floor((tonumber(seconds) or 0) + 0.5))
@@ -494753,6 +495006,7 @@ do
 
         local totalLabel = Instance.new('TextLabel')
         totalLabel.Name = 'Total'
+        totalLabel.BackgroundTransparency = 1
         totalLabel.AnchorPoint = Vector2.new(1, 0)
         totalLabel.Position = UDim2.new(1, -PAD, 0, progressTop + 15)
         totalLabel.Size = UDim2.fromOffset(44, 11)
@@ -494800,8 +495054,11 @@ do
         local prevControl = makeControl('Prev', '«', 30, -48, 20)
         local playButton = makeControl('Play', '▶', 36, 0, 14)
         local nextControl = makeControl('Next', '»', 30, 48, 20)
+        local shuffleControl = makeControl('Shuffle', '↔', 28, 0, 15)
         local loopControl = makeControl('Loop', '∞', 28, 0, 15)
 
+        shuffleControl.AnchorPoint = Vector2.new(1, 0.5)
+        shuffleControl.Position = UDim2.new(1, -32, 0.5, 0)
         loopControl.AnchorPoint = Vector2.new(1, 0.5)
         loopControl.Position = UDim2.new(1, 0, 0.5, 0)
 
@@ -494810,7 +495067,7 @@ do
         playButton.TextColor3 = TEXT_ACTIVE
 
         local function bindHover(button, baseTransparency, baseColor)
-            button.MouseEnter:Connect(function()
+            bind(button.MouseEnter, function()
                 TweenService:Create(
                     button,
                     TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
@@ -494821,7 +495078,7 @@ do
                 end
             end)
 
-            button.MouseLeave:Connect(function()
+            bind(button.MouseLeave, function()
                 TweenService:Create(
                     button,
                     TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
@@ -494837,6 +495094,7 @@ do
         bindHover(nextControl, 1, TEXT_IDLE)
         bindHover(playButton, 0.8, TEXT_ACTIVE)
         bindHover(loopControl, 1)
+        bindHover(shuffleControl, 1)
 
         -- search -----------------------------------------------------------
         local search = Instance.new('TextBox')
@@ -494968,6 +495226,27 @@ do
             rowCoverLabel.ZIndex = 4
             rowCoverLabel.Parent = rowCover
 
+            -- tiny equalizer drawn over the number while this row plays
+            local eqBars = {}
+            for barIndex = 1, 3 do
+                local bar = Instance.new('Frame')
+                bar.Name = 'Eq' .. barIndex
+                bar.AnchorPoint = Vector2.new(0.5, 1)
+                bar.Position = UDim2.fromOffset(11 + (barIndex - 2) * 5, 17)
+                bar.Size = UDim2.fromOffset(2, 6)
+                bar.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+                bar.BorderSizePixel = 0
+                bar.Visible = false
+                bar.ZIndex = 5
+                bar.Parent = rowCover
+
+                local barCorner = Instance.new('UICorner')
+                barCorner.CornerRadius = UDim.new(1, 0)
+                barCorner.Parent = bar
+
+                eqBars[barIndex] = bar
+            end
+
             local button = Instance.new('TextButton')
             button.Name = 'Track' .. index
             button.BackgroundTransparency = 1
@@ -495023,6 +495302,19 @@ do
             loopCorner.Parent = loopButton
 
             local hoverTween
+
+            local row = {
+                frame = rowFrame,
+                button = button,
+                duration = durationLabel,
+                loopButton = loopButton,
+                activeBar = activeBar,
+                coverLabel = rowCoverLabel,
+                eq = eqBars,
+                title = track.title,
+                lower = track.title:lower(),
+            }
+
             local function hover(on)
                 if music.current == index then
                     return
@@ -495040,45 +495332,35 @@ do
                 )
                 hoverTween:Play()
 
-                if rows[index] then
-                    rows[index].hoverTween = hoverTween
-                end
+                row.hoverTween = hoverTween
             end
 
-            button.MouseEnter:Connect(function()
+            bind(button.MouseEnter, function()
                 hover(true)
             end)
 
-            button.MouseLeave:Connect(function()
+            bind(button.MouseLeave, function()
                 hover(false)
             end)
 
-            loopButton.MouseEnter:Connect(function()
+            bind(loopButton.MouseEnter, function()
                 hover(true)
             end)
 
-            loopButton.MouseLeave:Connect(function()
+            bind(loopButton.MouseLeave, function()
                 hover(false)
             end)
 
-            button.Activated:Connect(function()
+            bind(button.Activated, function()
                 selected = index
                 loadAndPlay(index)
             end)
 
-            loopButton.Activated:Connect(function()
+            bind(loopButton.Activated, function()
                 music.toggleLoop(index)
             end)
 
-            rows[index] = {
-                frame = rowFrame,
-                button = button,
-                duration = durationLabel,
-                loopButton = loopButton,
-                activeBar = activeBar,
-                title = track.title,
-                lower = track.title:lower(),
-            }
+            rows[index] = row
         end
 
         local emptyLabel = Instance.new('TextLabel')
@@ -495105,9 +495387,10 @@ do
         footer.ZIndex = 3
         footer.Parent = panel
 
-        local volumeLabel = Instance.new('TextLabel')
+        local volumeLabel = Instance.new('TextButton')
         volumeLabel.Name = 'VolumeLabel'
         volumeLabel.BackgroundTransparency = 1
+        volumeLabel.BorderSizePixel = 0
         volumeLabel.Position = UDim2.fromOffset(0, 0)
         volumeLabel.Size = UDim2.fromOffset(24, FOOTER_HEIGHT)
         volumeLabel.Font = Enum.Font.GothamBold
@@ -495115,6 +495398,7 @@ do
         volumeLabel.TextColor3 = TEXT_DIM
         volumeLabel.TextXAlignment = Enum.TextXAlignment.Left
         volumeLabel.Text = 'VOL'
+        volumeLabel.AutoButtonColor = false
         volumeLabel.ZIndex = 3
         volumeLabel.Parent = footer
 
@@ -495197,33 +495481,57 @@ do
         end
 
         local function panelMetrics()
-            local absolute = island.AbsolutePosition
-            local size = island.AbsoluteSize
-            local camera = workspace.CurrentCamera
-            local viewport = camera and camera.ViewportSize or Vector2.new(1920, 1080)
-            local gap = 8
-            local contentHeight = targetPanelHeight()
-            local belowY = absolute.Y + size.Y + gap
-            local aboveY = absolute.Y - gap
-            local spaceBelow = viewport.Y - gap - belowY
-            local spaceAbove = aboveY - gap
-            local maxSpace = math.max(0, math.max(spaceBelow, spaceAbove))
-            local height = math.min(contentHeight, math.max(ROW_HEIGHT, maxSpace))
+            local origin = root.AbsolutePosition
+            local space = root.AbsoluteSize
+            local guiWidth, guiHeight = space.X, space.Y
 
-            -- prefer opening below the island, flip above only when the
-            -- space there is genuinely larger
-            panelBelow = spaceBelow >= height or spaceBelow >= spaceAbove
-
-            local x = absolute.X + size.X / 2
-            local minX = PANEL_WIDTH / 2 + gap
-            x = math.clamp(x, minX, math.max(minX, viewport.X - PANEL_WIDTH / 2 - gap))
-
-            local y
-            if panelBelow then
-                y = math.clamp(belowY, gap, math.max(gap, viewport.Y - height - gap))
-            else
-                y = math.clamp(aboveY, height + gap, math.max(height + gap, viewport.Y - gap))
+            if guiWidth < 40 or guiHeight < 40 then
+                local camera = workspace.CurrentCamera
+                local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
+                guiWidth, guiHeight = viewport.X, viewport.Y
             end
+
+            local islandPos = island.AbsolutePosition
+            local islandSize = island.AbsoluteSize
+            local islandX = islandPos.X - origin.X
+            local islandY = islandPos.Y - origin.Y
+            local islandW = math.max(1, islandSize.X)
+            local islandH = math.max(1, islandSize.Y)
+
+            local gap = 8
+            local content = targetPanelHeight()
+            local belowTop = islandY + islandH + gap
+            local aboveBottom = islandY - gap
+            local spaceBelow = guiHeight - gap - belowTop
+            local spaceAbove = aboveBottom - gap
+            local minimum = math.min(content, CHROME + (ROW_HEIGHT + ROW_GAP) * 3)
+
+            local below
+            if spaceBelow >= minimum and spaceAbove >= minimum then
+                below = spaceBelow >= spaceAbove
+            elseif spaceBelow >= minimum then
+                below = true
+            elseif spaceAbove >= minimum then
+                below = false
+            else
+                below = spaceBelow >= spaceAbove
+            end
+
+            panelBelow = below
+
+            -- the card is never taller than the side it opens towards, so it
+            -- can never slide back over (or under) the island.  When that side
+            -- is very short the card just gets shorter and the list scrolls.
+            local room = below and spaceBelow or spaceAbove
+            local height = math.min(content, math.max(ROW_HEIGHT, room))
+
+            local x = islandX + islandW / 2
+            local minX = PANEL_WIDTH / 2 + gap
+            x = math.clamp(x, minX, math.max(minX, guiWidth - PANEL_WIDTH / 2 - gap))
+
+            -- pin the edge that faces the island and let the other one fall
+            -- wherever the height puts it, so the gap to the island is exact
+            local y = below and belowTop or aboveBottom
 
             local listHeight = math.max(ROW_HEIGHT, height - CHROME)
             return x, y, height, listHeight
@@ -495241,16 +495549,18 @@ do
         end
 
         local function positionDroplet()
-            local absolute = island.AbsolutePosition
-            local size = island.AbsoluteSize
-            local x = absolute.X + size.X / 2
+            local origin = root.AbsolutePosition
+            local islandPos = island.AbsolutePosition
+            local islandSize = island.AbsoluteSize
+            local x = islandPos.X - origin.X + islandSize.X / 2
+            local top = islandPos.Y - origin.Y
 
             if panelBelow then
                 droplet.AnchorPoint = Vector2.new(0.5, 0)
-                droplet.Position = UDim2.fromOffset(x, absolute.Y + size.Y + 1)
+                droplet.Position = UDim2.fromOffset(x, top + islandSize.Y + 1)
             else
                 droplet.AnchorPoint = Vector2.new(0.5, 1)
-                droplet.Position = UDim2.fromOffset(x, absolute.Y - 1)
+                droplet.Position = UDim2.fromOffset(x, top - 1)
             end
         end
 
@@ -495291,6 +495601,25 @@ do
             end
         end
 
+        animateRows = function()
+            eqPhase += 0.55
+            local playing = music.isPlaying()
+
+            for index, row in ipairs(rows) do
+                local active = music.current == index and playing
+                row.coverLabel.Visible = not active
+
+                for barIndex, bar in ipairs(row.eq) do
+                    bar.Visible = active
+
+                    if active then
+                        local height = 4 + 11 * (0.5 + 0.5 * math.sin(eqPhase + barIndex * 1.15))
+                        bar.Size = UDim2.fromOffset(2, height)
+                    end
+                end
+            end
+        end
+
         updateHeader = function()
             local index = music.current
             local displayIndex = loadingIndex or index
@@ -495322,7 +495651,7 @@ do
                     and string.format('%s  ·  %s', mode, formatTime(total))
                     or mode
                 statusLabel.TextColor3 = (failedTitle and not playing)
-                    and Color3.fromRGB(255, 142, 142)
+                    and DANGER
                     or TEXT_MUTED
             else
                 titleLabel.Text = 'Music'
@@ -495338,7 +495667,7 @@ do
                     statusLabel.TextColor3 = TEXT_MUTED
                 elseif failedTitle then
                     statusLabel.Text = 'could not load ' .. failedTitle
-                    statusLabel.TextColor3 = Color3.fromRGB(255, 142, 142)
+                    statusLabel.TextColor3 = DANGER
                 else
                     statusLabel.Text = 'choose a song'
                     statusLabel.TextColor3 = TEXT_MUTED
@@ -495349,10 +495678,17 @@ do
             local looped = loopIndex ~= nil and music.isLooped(loopIndex)
 
             loopControl.TextColor3 = looped and ACCENT or TEXT_IDLE
+            shuffleControl.TextColor3 = music.shuffle and ACCENT or TEXT_IDLE
             playButton.Text = playing and 'II' or '▶'
         end
 
         updateProgress = function()
+            -- while the bar is being dragged the fill follows the mouse, not
+            -- the sound, so it does not fight the preview
+            if scrubbing then
+                return
+            end
+
             local total = music.length(music.current)
             local position = math.clamp(music.position(), 0, math.max(0, total))
             local fraction = total > 0 and (position / total) or 0
@@ -495364,9 +495700,57 @@ do
 
         updateVolume = function()
             local value = math.clamp(music.volume or 0, 0, 1)
+            local muted = music.muted == true
 
-            volumeFill.Size = UDim2.new(value, 0, 1, 0)
-            volumePercent.Text = string.format('%d%%', math.floor(value * 100 + 0.5))
+            volumeFill.Size = UDim2.new(muted and 0 or value, 0, 1, 0)
+            volumeLabel.Text = muted and 'OFF' or 'VOL'
+            volumeLabel.TextColor3 = muted and ACCENT or TEXT_DIM
+
+            if muted then
+                volumePercent.Text = 'MUTE'
+                volumePercent.TextColor3 = ACCENT
+            else
+                volumePercent.Text = string.format('%d%%', math.floor(value * 100 + 0.5))
+                volumePercent.TextColor3 = TEXT_DIM
+            end
+        end
+
+        local lastSignature = nil
+
+        local function currentSignature()
+            local bits = {
+                tostring(music.current or 0),
+                tostring(selected or 0),
+                tostring(loadingIndex or 0),
+                tostring(music.muted == true),
+                tostring(music.shuffle == true),
+                tostring(failedTitle or ''),
+            }
+
+            for index = 1, #music.tracks do
+                bits[#bits + 1] = music.isLooped(index) and '1' or '0'
+            end
+
+            return table.concat(bits, '|')
+        end
+
+        -- the card repaints itself from that loop, not from a callback, so a
+        -- missed event can never leave the controls showing stale state
+        syncUI = function(force)
+            if not panelOpen then
+                return
+            end
+
+            local signature = currentSignature()
+            if force or signature ~= lastSignature then
+                lastSignature = signature
+                refreshRows()
+            end
+
+            updateHeader()
+            updateProgress()
+            updateVolume()
+            animateRows()
         end
 
         music.onChange = function()
@@ -495374,16 +495758,22 @@ do
                 failedTitle = nil
             end
 
-            refreshRows()
-            updateHeader()
-            updateProgress()
-            updateVolume()
+            syncUI()
         end
 
-        refreshRows()
-        updateHeader()
-        updateProgress()
-        updateVolume()
+        seekToPosition = function(positionX)
+            local total = music.length(music.current)
+            if total <= 0 then
+                return
+            end
+
+            scrubFraction = fractionAt(progressButton, positionX)
+            fill.Size = UDim2.new(scrubFraction, 0, 1, 0)
+            elapsedLabel.Text = formatTime(total * scrubFraction)
+
+            -- a click jumps straight away; dragging only commits on release
+            music.seek(total * scrubFraction)
+        end
 
         local function resizePanel()
             if not panelOpen then
@@ -495406,6 +495796,63 @@ do
             panelTween:Play()
         end
 
+        -- the game hides the mouse icon while you play, which leaves an
+        -- invisible cursor over the card; force it back while we are open
+        local savedIcon = nil
+        local savedBehavior = nil
+        local cursorToken = 0
+
+        local function acquireCursor()
+            if savedIcon == nil then
+                savedIcon = UserInputService.MouseIconEnabled
+                savedBehavior = UserInputService.MouseBehavior
+            end
+
+            pcall(function()
+                UserInputService.MouseIconEnabled = true
+            end)
+
+            cursorToken += 1
+            local token = cursorToken
+
+            task.spawn(function()
+                while token == cursorToken and panelOpen do
+                    if not UserInputService.MouseIconEnabled then
+                        pcall(function()
+                            UserInputService.MouseIconEnabled = true
+                        end)
+                    end
+
+                    if UserInputService.MouseBehavior ~= Enum.MouseBehavior.Default then
+                        pcall(function()
+                            UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+                        end)
+                    end
+
+                    task.wait(0.2)
+                end
+            end)
+        end
+
+        local function releaseCursor()
+            cursorToken += 1
+
+            if savedIcon ~= nil then
+                pcall(function()
+                    UserInputService.MouseIconEnabled = savedIcon
+                end)
+            end
+
+            if savedBehavior ~= nil then
+                pcall(function()
+                    UserInputService.MouseBehavior = savedBehavior
+                end)
+            end
+
+            savedIcon = nil
+            savedBehavior = nil
+        end
+
         closePanel = function()
             if not panelOpen then
                 return
@@ -495415,6 +495862,7 @@ do
             overlay.Visible = false
             dropletToken += 1
             droplet.Visible = false
+            releaseCursor()
 
             if search:IsFocused() then
                 search:ReleaseFocus()
@@ -495447,12 +495895,11 @@ do
             overlay.Visible = true
             panel.Visible = true
             panelCorner.CornerRadius = UDim.new(1, 0)
+            acquireCursor()
 
             selected = music.current or selected or 1
-            refreshRows()
-            updateHeader()
-            updateProgress()
-            updateVolume()
+            lastSignature = nil
+            syncUI(true)
 
             local height = positionPanel()
             panel.Size = UDim2.fromOffset(PANEL_WIDTH, 0)
@@ -495553,14 +496000,17 @@ do
         -- hand the real implementations to the island
         togglePanel = openOrClosePanel
         syncPanel = function()
+            if not panelOpen then
+                return
+            end
+
             local height = positionPanel()
 
-            if panelOpen then
-                if panelTween then
-                    panelTween:Cancel()
-                end
-                panel.Size = UDim2.fromOffset(PANEL_WIDTH, height)
+            if panelTween then
+                panelTween:Cancel()
             end
+
+            panel.Size = UDim2.fromOffset(PANEL_WIDTH, height)
         end
 
         loadAndPlay = function(index)
@@ -495572,8 +496022,7 @@ do
             failedTitle = nil
             selected = index
 
-            updateHeader()
-            refreshRows()
+            syncUI(true)
 
             task.spawn(function()
                 task.wait(0.05)
@@ -495585,8 +496034,7 @@ do
                 end
 
                 loadingIndex = nil
-                updateHeader()
-                refreshRows()
+                syncUI(true)
             end)
         end
 
@@ -495675,64 +496123,115 @@ do
         end
 
         -- interactions -----------------------------------------------------
-        progressButton.InputBegan:Connect(function(input)
-            if input.UserInputType ~= Enum.UserInputType.MouseButton1
-                and input.UserInputType ~= Enum.UserInputType.Touch then
-                return
-            end
-
+        local function previewScrub(positionX)
             local total = music.length(music.current)
             if total <= 0 then
                 return
             end
 
-            music.seek(total * fractionAt(progressButton, input.Position.X))
+            scrubFraction = fractionAt(progressButton, positionX)
+            fill.Size = UDim2.new(scrubFraction, 0, 1, 0)
+            elapsedLabel.Text = formatTime(total * scrubFraction)
+        end
+
+        local function commitScrub()
+            local total = music.length(music.current)
+
+            if total > 0 and scrubFraction then
+                music.seek(total * scrubFraction)
+            end
+        end
+
+        bind(progressButton.InputBegan, function(input)
+            if not isPrimary(input) then
+                return
+            end
+
+            scrubbing = true
+            seekToPosition(input.Position.X)
         end)
 
-        volumeButton.InputBegan:Connect(function(input)
-            if input.UserInputType ~= Enum.UserInputType.MouseButton1
+        bind(volumeButton.InputBegan, function(input)
+            if not isPrimary(input) then
+                return
+            end
+
+            volumeDragging = true
+            music.setVolume(fractionAt(volumeButton, input.Position.X))
+        end)
+
+        bind(UserInputService.InputChanged, function(input)
+            if input.UserInputType ~= Enum.UserInputType.MouseMovement
                 and input.UserInputType ~= Enum.UserInputType.Touch then
                 return
             end
 
-            music.setVolume(fractionAt(volumeButton, input.Position.X))
+            if scrubbing then
+                previewScrub(input.Position.X)
+            end
+
+            if volumeDragging then
+                music.setVolume(fractionAt(volumeButton, input.Position.X))
+            end
         end)
 
-        prevControl.Activated:Connect(function()
+        bind(UserInputService.InputEnded, function(input)
+            if not isPrimary(input) then
+                return
+            end
+
+            if scrubbing then
+                commitScrub()
+            end
+
+            scrubbing = false
+            scrubFraction = nil
+            volumeDragging = false
+        end)
+
+        bind(prevControl.Activated, function()
             music.step(-1)
         end)
 
-        nextControl.Activated:Connect(function()
+        bind(nextControl.Activated, function()
             music.step(1)
         end)
 
-        playButton.Activated:Connect(function()
+        bind(playButton.Activated, function()
             music.toggle()
         end)
 
-        loopControl.Activated:Connect(function()
+        bind(loopControl.Activated, function()
             local index = music.current or selected
             if index then
                 music.toggleLoop(index)
             end
         end)
 
-        clearSearch.Activated:Connect(function()
+        bind(shuffleControl.Activated, function()
+            music.toggleShuffle()
+        end)
+
+        bind(volumeLabel.Activated, function()
+            music.toggleMute()
+        end)
+
+        bind(clearSearch.Activated, function()
             search.Text = ''
         end)
 
-        closeButton.Activated:Connect(closePanel)
-        overlay.Activated:Connect(closePanel)
+        bind(closeButton.Activated, closePanel)
+        bind(overlay.Activated, closePanel)
 
         search.TextChanged:Connect(applyFilter)
 
-        screenGui.Destroying:Connect(function()
-            if music.onChange then
-                music.onChange = nil
+        search.FocusLost:Connect(function(enterPressed)
+            if enterPressed and rows[selected] and rows[selected].frame.Visible then
+                loadAndPlay(selected)
             end
         end)
 
-        local keyboardConnection = UserInputService.InputBegan:Connect(function(input, processed)
+        bind(UserInputService.InputBegan, function(input, processed)
             if processed or not panelOpen then
                 return
             end
@@ -495755,6 +496254,17 @@ do
                 moveSelection(1)
             elseif key == Enum.KeyCode.Up then
                 moveSelection(-1)
+            elseif key == Enum.KeyCode.Left then
+                music.seekBy(-5)
+            elseif key == Enum.KeyCode.Right then
+                music.seekBy(5)
+            elseif key == Enum.KeyCode.M then
+                music.toggleMute()
+            elseif key == Enum.KeyCode.L then
+                local index = music.current or selected
+                if index then
+                    music.toggleLoop(index)
+                end
             elseif key == Enum.KeyCode.Return or key == Enum.KeyCode.KeypadEnter then
                 if selected then
                     loadAndPlay(selected)
@@ -495764,21 +496274,37 @@ do
             end
         end)
 
-        screenGui.Destroying:Connect(function()
-            keyboardConnection:Disconnect()
-        end)
+        -- initial paint
+        refreshRows()
 
-        -- keep the seek/time labels moving while the card is open
-        task.spawn(function()
-            while screenGui.Parent do
-                if panelOpen then
-                    updateProgress()
-                    task.wait(0.1)
-                else
-                    task.wait(0.3)
-                end
+        screenGui.Destroying:Connect(function()
+            for _, connection in ipairs(connections) do
+                connection:Disconnect()
+            end
+
+            if music.onChange then
+                music.onChange = nil
             end
         end)
+
+        pickerSync = syncUI
+        end)
+
+        -- the card refreshes itself from here, so its controls stay live even
+        -- when a change callback is missed
+        task.spawn(function()
+            local warned = false
+
+            while screenGui.Parent do
+                local ok, err = pcall(pickerSync)
+
+                if not ok and not warned then
+                    warned = true
+                    warn('[' .. BRAND .. '] picker refresh failed: ' .. tostring(err))
+                end
+
+                task.wait(0.1)
+            end
         end)
 
         if not pickerOk then
@@ -495807,6 +496333,49 @@ do
                     stroke.Transparency = 0.6
                 end
 
+                -- now playing indicator
+                local current = music.current
+                local track = current and music.tracks[current] or nil
+
+                if track then
+                    local title = '♪ ' .. track.title
+
+                    if songLabel.Text ~= title then
+                        songLabel.Text = title
+                        fitIsland()
+                    end
+
+                    songLabel.Visible = songAllowed
+
+                    local total = music.length(current)
+                    local fraction = 0
+
+                    if total > 0 then
+                        fraction = math.clamp(music.position() / total, 0, 1)
+                    end
+
+                    local origin = hudRoot.AbsolutePosition
+                    local islandPos = island.AbsolutePosition
+                    local islandSize = island.AbsoluteSize
+                    local left = islandPos.X - origin.X + 10
+                    local top = islandPos.Y - origin.Y + islandSize.Y - 4
+                    local width = math.max(0, islandSize.X - 20)
+
+                    progressTrack.Position = UDim2.fromOffset(left, top)
+                    progressTrack.Size = UDim2.fromOffset(width, 2)
+                    progressLine.Position = UDim2.fromOffset(left, top)
+                    progressLine.Size = UDim2.fromOffset(width * fraction, 2)
+
+                    local showLine = island.Visible and width > 20
+                    progressTrack.Visible = showLine
+                    progressLine.Visible = showLine
+                elseif songLabel.Visible or progressLine.Visible then
+                    songLabel.Visible = false
+                    progressTrack.Visible = false
+                    progressLine.Visible = false
+                    fitIsland()
+                end
+
                 task.wait(0.06)
             end
         end)
@@ -495815,6 +496384,9 @@ do
         local hasAvatar = false
         local manualStatus = nil
         local lastAvatarId = nil
+        local lastDisplay = nil
+        local lastStatus = nil
+        local lastPlatform = nil
 
         local function render(display, status, platform)
             local color = STATUS_COLORS[status] or STATUS_COLORS.unknown
@@ -495825,6 +496397,16 @@ do
             dot.BackgroundColor3 = color
             stroke.Color = color
             stroke.Transparency = 0.55
+
+            lastDisplay = display
+            lastStatus = status
+            lastPlatform = platform
+
+            if compactPresence then
+                nameLabel.Text = '<font color="' .. colorHex(ACCENT) .. '">'
+                    .. escapeRich(BRAND) .. '</font>'
+                return
+            end
 
             local text = '<font color="' .. colorHex(ACCENT) .. '">' .. escapeRich(BRAND) .. '</font>  '
                 .. escapeRich(display)
@@ -495838,6 +496420,12 @@ do
             end
 
             nameLabel.Text = text
+        end
+
+        redrawPresence = function()
+            if lastDisplay then
+                render(lastDisplay, lastStatus, lastPlatform)
+            end
         end
 
         local function setAvatar(asset)
@@ -496038,10 +496626,12 @@ do
 
         task.spawn(function()
             refreshPresence()
+            fitIsland()
 
             while screenGui.Parent do
                 task.wait(POLL_SECONDS)
                 refreshPresence()
+                fitIsland()
             end
         end)
 
@@ -496069,6 +496659,23 @@ do
                 uptimeLabel.Text = formatUptime(os.clock() - startedAt)
                 clockLabel.Text = localClock()
                 task.wait(1)
+            end
+        end)
+
+        -- keep the island fitting when the window or camera changes
+        task.spawn(function()
+            local lastWidth = nil
+
+            while screenGui.Parent do
+                local camera = workspace.CurrentCamera
+                local width = camera and camera.ViewportSize.X or nil
+
+                if width and width ~= lastWidth then
+                    lastWidth = width
+                    fitIsland()
+                end
+
+                task.wait(0.5)
             end
         end)
 
@@ -496144,7 +496751,26 @@ do
             return music.toggle()
         end
 
+        env.UE_ToggleShuffle = function()
+            return music.toggleShuffle()
+        end
+
+        env.UE_SetShuffle = function(value)
+            return music.setShuffle(value)
+        end
+
+        env.UE_ToggleMute = function()
+            return music.toggleMute()
+        end
+
+        env.UE_SeekBy = function(seconds)
+            return music.seekBy(seconds)
+        end
+
         print('[' .. BRAND .. '] HUD ready - drag to move, click for the song picker.')
+        if not pickerOk then
+            warn('[' .. BRAND .. '] the song picker only half built; see the warning above.')
+        end
         if DISCORD_ID == '' then
             print('[' .. BRAND .. '] no Discord user ID set; presence disabled.')
         end
@@ -496205,6 +496831,7 @@ do
     --   getgenv().UE_PlayTrack(3) / UE_PlayTrack('el clasico')
     --   getgenv().UE_SetTrackLoop(3, false) / UE_ToggleTrackLoop(3)
     --   getgenv().UE_NextTrack() / UE_PrevTrack() / UE_SeekTrack(30)
+    --   getgenv().UE_SeekBy(-5) / UE_ToggleShuffle() / UE_ToggleMute()
     --   getgenv().UE_ToggleMusic() / UE_SetMusicVolume(0.5)
     --   getgenv().UE_DumpTextLabels()
     -----------------------------------------------------------------------
