@@ -493547,7 +493547,7 @@ do
         { title = 'Radyoda Neşet', file = 'song7.ogg', duration = 171.1 },
     }
     local MUSIC_VOLUME = 0.250
-    local BUILD_ID = 'b9ce3d99'
+    local BUILD_ID = '64cd587c'
     local POLL_SECONDS = 20
 
     local env = getgenv and getgenv() or _G
@@ -493950,6 +493950,12 @@ do
         muted = false,
         shuffle = config.shuffle == true,
         fadeToken = 0,
+        fadeTween = nil,
+        -- playback state the sound itself cannot report
+        paused = false,
+        wasPlaying = false,
+        playingSince = 0,
+        advancedAt = 0,
     }
 
     -- what the Sound should actually be at right now
@@ -494015,19 +494021,40 @@ do
         env.prampa_Music = sound
 
         sound.Ended:Connect(function()
-            -- a song that finished with its loop off rolls on to the next
-            if music.current and not music.isLooped(music.current) then
-                local nextIndex = music.nextIndex(1)
+            -- the track that just finished rolls on to the next one unless
+            -- its own loop is on (a looped Sound never raises Ended)
+            music.wasPlaying = false
+            music.advance()
+        end)
 
-                if nextIndex then
-                    music.play(nextIndex)
-                    return
+        -- watchdog: an Ended event can be missed when the executor swaps or
+        -- streams the asset, so notice "was playing, no longer playing, not
+        -- paused" as well.  It only fires after two seconds of real playback
+        -- so the short idle moment while a track loads can never skip a song.
+        RunService.Heartbeat:Connect(function()
+            local active = music.sound
+            if not active then
+                return
+            end
+
+            if active.IsPlaying then
+                if not music.wasPlaying then
+                    music.wasPlaying = true
+                    music.playingSince = os.clock()
                 end
+                return
             end
 
-            if music.onChange then
-                music.onChange()
+            if not music.wasPlaying or music.paused then
+                return
             end
+
+            if os.clock() - (music.playingSince or 0) < 2 then
+                return
+            end
+
+            music.wasPlaying = false
+            music.advance()
         end)
     end
 
@@ -494035,13 +494062,40 @@ do
         return music.sound ~= nil and music.sound.IsPlaying == true
     end
 
+    -- roll on to the next track after one finishes.  Ended and the heartbeat
+    -- watchdog both call this, so the debounce stops a single finish from
+    -- skipping two songs.
+    function music.advance()
+        if not music.current then
+            return false
+        end
+
+        if os.clock() - (music.advancedAt or 0) < 0.75 then
+            return false
+        end
+
+        music.advancedAt = os.clock()
+
+        if music.isLooped(music.current) then
+            return false
+        end
+
+        local target = music.nextIndex(1)
+        if not target then
+            return false
+        end
+
+        return music.play(target)
+    end
+
     function music.isLooped(index)
         if not index then
             return false
         end
 
-        -- loop is on unless the user turned it off for this track
-        return music.loop[index] ~= false
+        -- loop is opt-in per track: by default a finished song hands over to
+        -- the next one instead of repeating itself
+        return music.loop[index] == true
     end
 
     function music.setLoop(index, value)
@@ -494098,11 +494152,18 @@ do
         music.fadeToken += 1
         local token = music.fadeToken
 
-        TweenService:Create(
+        -- one fade at a time: two live tweens on Volume would fight
+        if music.fadeTween then
+            music.fadeTween:Cancel()
+            music.fadeTween = nil
+        end
+
+        music.fadeTween = TweenService:Create(
             music.sound,
             TweenInfo.new(math.max(0.01, duration), Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
             { Volume = target }
-        ):Play()
+        )
+        music.fadeTween:Play()
 
         if done then
             task.delay(math.max(0.01, duration), function()
@@ -494192,6 +494253,10 @@ do
             return false
         end
 
+        music.paused = false
+        music.wasPlaying = false
+        music.playingSince = 0
+
         -- clicking the current track restarts it instead of layering a copy
         if music.current == index and music.sound.SoundId ~= '' then
             music.sound.Looped = music.isLooped(index)
@@ -494245,9 +494310,16 @@ do
         end
 
         if music.sound.IsPlaying then
+            music.paused = true
+
             music.fadeTo(0, 0.14, function()
-                music.sound:Pause()
-                music.sound.Volume = music.level()
+                if music.paused and music.sound then
+                    music.sound:Pause()
+                end
+
+                if music.sound then
+                    music.sound.Volume = music.level()
+                end
 
                 if music.onChange then
                     music.onChange()
@@ -494255,7 +494327,18 @@ do
             end)
         elseif music.current then
             music.sound.Volume = 0
-            music.sound:Play()
+
+            -- Resume, not Play: Play on a paused Sound starts it again from
+            -- 0:00, which made pausing look like a restart
+            if music.paused then
+                music.sound:Resume()
+            else
+                music.sound:Play()
+            end
+
+            music.paused = false
+            music.wasPlaying = true
+            music.playingSince = os.clock()
             music.fadeTo(music.level(), 0.2)
         elseif #music.tracks > 0 then
             music.play(1)
@@ -494278,6 +494361,11 @@ do
         music.muted = false
         music.fadeToken += 1
 
+        if music.fadeTween then
+            music.fadeTween:Cancel()
+            music.fadeTween = nil
+        end
+
         if music.sound then
             music.sound.Volume = music.level()
         end
@@ -494295,6 +494383,11 @@ do
     function music.setMuted(value)
         music.muted = value and true or false
         music.fadeToken += 1
+
+        if music.fadeTween then
+            music.fadeTween:Cancel()
+            music.fadeTween = nil
+        end
 
         if music.sound then
             music.sound.Volume = music.level()
@@ -494978,6 +495071,13 @@ do
         fillCorner.CornerRadius = UDim.new(1, 0)
         fillCorner.Parent = fill
 
+        -- a thin glow makes the played part read as light, not paint
+        local fillGlow = Instance.new('UIStroke')
+        fillGlow.Color = ACCENT
+        fillGlow.Transparency = 0.45
+        fillGlow.Thickness = 2
+        fillGlow.Parent = fill
+
         local knob = Instance.new('Frame')
         knob.Name = 'Knob'
         knob.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -495067,6 +495167,32 @@ do
         playButton.BackgroundTransparency = 0.8
         playButton.TextColor3 = TEXT_ACTIVE
 
+        -- the pause state is drawn as two bars: 'II' in the bold font reads
+        -- like letters rather than an icon
+        local pauseBars = Instance.new('Frame')
+        pauseBars.Name = 'PauseBars'
+        pauseBars.BackgroundTransparency = 1
+        pauseBars.Size = UDim2.fromScale(1, 1)
+        pauseBars.Visible = false
+        pauseBars.ZIndex = playButton.ZIndex + 1
+        pauseBars.Parent = playButton
+
+        for barIndex = 1, 2 do
+            local bar = Instance.new('Frame')
+            bar.Name = 'Bar' .. barIndex
+            bar.AnchorPoint = Vector2.new(0.5, 0.5)
+            bar.Position = UDim2.new(0.5, barIndex == 1 and -3 or 3, 0.5, 0)
+            bar.Size = UDim2.fromOffset(4, 13)
+            bar.BackgroundColor3 = TEXT_ACTIVE
+            bar.BorderSizePixel = 0
+            bar.ZIndex = playButton.ZIndex + 1
+            bar.Parent = pauseBars
+
+            local barCorner = Instance.new('UICorner')
+            barCorner.CornerRadius = UDim.new(0, 1)
+            barCorner.Parent = bar
+        end
+
         local function bindHover(button, baseTransparency, baseColor)
             bind(button.MouseEnter, function()
                 TweenService:Create(
@@ -495119,6 +495245,12 @@ do
         local searchCorner = Instance.new('UICorner')
         searchCorner.CornerRadius = UDim.new(0, 9)
         searchCorner.Parent = search
+
+        local searchGlow = Instance.new('UIStroke')
+        searchGlow.Color = ACCENT
+        searchGlow.Transparency = 1
+        searchGlow.Thickness = 1
+        searchGlow.Parent = search
 
         local searchPadding = Instance.new('UIPadding')
         searchPadding.PaddingLeft = UDim.new(0, 10)
@@ -495394,14 +495526,43 @@ do
         volumeLabel.BorderSizePixel = 0
         volumeLabel.Position = UDim2.fromOffset(0, 0)
         volumeLabel.Size = UDim2.fromOffset(24, FOOTER_HEIGHT)
-        volumeLabel.Font = Enum.Font.GothamBold
-        volumeLabel.TextSize = 8
-        volumeLabel.TextColor3 = TEXT_DIM
-        volumeLabel.TextXAlignment = Enum.TextXAlignment.Left
-        volumeLabel.Text = 'VOL'
+        volumeLabel.Text = ''
         volumeLabel.AutoButtonColor = false
         volumeLabel.ZIndex = 3
         volumeLabel.Parent = footer
+
+        -- a tiny level meter instead of the word "VOL": three bars that light
+        -- up with the volume and a slash across them while muted
+        local volumeBars = {}
+        for barIndex = 1, 3 do
+            local bar = Instance.new('Frame')
+            bar.Name = 'Bar' .. barIndex
+            bar.AnchorPoint = Vector2.new(0, 1)
+            bar.Position = UDim2.fromOffset(2 + (barIndex - 1) * 5, FOOTER_HEIGHT / 2 + 5)
+            bar.Size = UDim2.fromOffset(3, 3 + (barIndex - 1) * 4)
+            bar.BackgroundColor3 = TEXT_DIM
+            bar.BorderSizePixel = 0
+            bar.ZIndex = 3
+            bar.Parent = volumeLabel
+
+            local barCorner = Instance.new('UICorner')
+            barCorner.CornerRadius = UDim.new(0, 1)
+            barCorner.Parent = bar
+
+            volumeBars[barIndex] = bar
+        end
+
+        local volumeSlash = Instance.new('Frame')
+        volumeSlash.Name = 'Slash'
+        volumeSlash.AnchorPoint = Vector2.new(0.5, 0.5)
+        volumeSlash.Position = UDim2.fromOffset(12, FOOTER_HEIGHT / 2)
+        volumeSlash.Size = UDim2.fromOffset(22, 2)
+        volumeSlash.Rotation = -45
+        volumeSlash.BackgroundColor3 = ACCENT
+        volumeSlash.BorderSizePixel = 0
+        volumeSlash.Visible = false
+        volumeSlash.ZIndex = 4
+        volumeSlash.Parent = volumeLabel
 
         local volumeButton = Instance.new('TextButton')
         volumeButton.Name = 'Volume'
@@ -495456,6 +495617,72 @@ do
         volumePercent.Text = '25%'
         volumePercent.ZIndex = 3
         volumePercent.Parent = footer
+
+        -- click feedback ---------------------------------------------------
+        --   one shared ripple, so every control answers a press the same way
+        local function pressFX(button)
+            button.ClipsDescendants = true
+
+            local ripple = Instance.new('Frame')
+            ripple.Name = 'PressRipple'
+            ripple.AnchorPoint = Vector2.new(0.5, 0.5)
+            ripple.Position = UDim2.fromScale(0.5, 0.5)
+            ripple.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+            ripple.BackgroundTransparency = 1
+            ripple.BorderSizePixel = 0
+            ripple.Size = UDim2.fromOffset(8, 8)
+            ripple.ZIndex = math.max(0, button.ZIndex - 1)
+            ripple.Parent = button
+
+            local rippleCorner = Instance.new('UICorner')
+            rippleCorner.CornerRadius = UDim.new(1, 0)
+            rippleCorner.Parent = ripple
+
+            bind(button.Activated, function()
+                local width = math.max(button.AbsoluteSize.X, button.AbsoluteSize.Y)
+                local size = math.max(14, width * 1.7)
+
+                ripple.Size = UDim2.fromOffset(8, 8)
+                ripple.BackgroundTransparency = 0.8
+
+                TweenService:Create(
+                    ripple,
+                    TweenInfo.new(0.3, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+                    { Size = UDim2.fromOffset(size, size), BackgroundTransparency = 1 }
+                ):Play()
+            end)
+        end
+
+        pressFX(prevControl)
+        pressFX(playButton)
+        pressFX(nextControl)
+        pressFX(shuffleControl)
+        pressFX(loopControl)
+        pressFX(closeButton)
+        pressFX(clearSearch)
+        pressFX(volumeLabel)
+
+        for _, row in ipairs(rows) do
+            pressFX(row.button)
+            pressFX(row.loopButton)
+        end
+
+        -- the seek bar knob grows under the pointer
+        bind(progressButton.MouseEnter, function()
+            TweenService:Create(
+                knob,
+                TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+                { Size = UDim2.fromOffset(11, 11) }
+            ):Play()
+        end)
+
+        bind(progressButton.MouseLeave, function()
+            TweenService:Create(
+                knob,
+                TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+                { Size = UDim2.fromOffset(8, 8) }
+            ):Play()
+        end)
 
         -- helpers ----------------------------------------------------------
         local function fractionAt(button, positionX)
@@ -495610,6 +495837,12 @@ do
                 local active = music.current == index and playing
                 row.coverLabel.Visible = not active
 
+                if active then
+                    -- the marker breathes with the equalizer
+                    row.activeBar.BackgroundTransparency =
+                        0.15 + 0.35 * (0.5 + 0.5 * math.sin(eqPhase * 0.5))
+                end
+
                 for barIndex, bar in ipairs(row.eq) do
                     bar.Visible = active
 
@@ -495680,7 +495913,8 @@ do
 
             loopControl.TextColor3 = looped and ACCENT or TEXT_IDLE
             shuffleControl.TextColor3 = music.shuffle and ACCENT or TEXT_IDLE
-            playButton.Text = playing and 'II' or '▶'
+            playButton.Text = playing and '' or '▶'
+            pauseBars.Visible = playing
         end
 
         updateProgress = function()
@@ -495702,10 +495936,16 @@ do
         updateVolume = function()
             local value = math.clamp(music.volume or 0, 0, 1)
             local muted = music.muted == true
+            local lit = math.ceil(value * 3)
 
             volumeFill.Size = UDim2.new(muted and 0 or value, 0, 1, 0)
-            volumeLabel.Text = muted and 'OFF' or 'VOL'
-            volumeLabel.TextColor3 = muted and ACCENT or TEXT_DIM
+            volumeSlash.Visible = muted
+
+            for barIndex, bar in ipairs(volumeBars) do
+                local on = not muted and barIndex <= lit
+                bar.BackgroundColor3 = on and ACCENT or TEXT_DIM
+                bar.BackgroundTransparency = on and 0 or 0.45
+            end
 
             if muted then
                 volumePercent.Text = 'MUTE'
@@ -495858,6 +496098,14 @@ do
             lastSignature = nil
             syncUI(true)
 
+            -- the cover snaps upright with a little overshoot
+            cover.Rotation = -9
+            TweenService:Create(
+                cover,
+                TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+                { Rotation = 0 }
+            ):Play()
+
             local height = positionPanel()
             panel.Size = UDim2.fromOffset(PANEL_WIDTH, 0)
 
@@ -495946,7 +496194,17 @@ do
             task.defer(scrollToSelected)
         end
 
+        local lastToggleAt = -1
+
         local function openOrClosePanel()
+            -- the same click must never toggle twice (mouse + synthetic
+            -- touch, or a release that arrives twice)
+            if os.clock() - lastToggleAt < 0.12 then
+                return
+            end
+
+            lastToggleAt = os.clock()
+
             if panelOpen then
                 closePanel()
             else
@@ -496193,6 +496451,23 @@ do
         bind(overlay.Activated, closePanel)
 
         search.TextChanged:Connect(applyFilter)
+
+        -- the search field lights up while it has focus
+        bind(search.Focused, function()
+            TweenService:Create(
+                searchGlow,
+                TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+                { Transparency = 0.35 }
+            ):Play()
+        end)
+
+        bind(search.FocusLost, function()
+            TweenService:Create(
+                searchGlow,
+                TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+                { Transparency = 1 }
+            ):Play()
+        end)
 
         search.FocusLost:Connect(function(enterPressed)
             if enterPressed and rows[selected] and rows[selected].frame.Visible then
@@ -496465,25 +496740,21 @@ do
 
         -- dragging + collapse --------------------------------------------
         --   a press only becomes a drag once the pointer really moved, so a
-        --   plain click opens the card instead.  The island is switched to an
-        --   offset position *and* pinned to where it already is in the same
-        --   step, so the anchor change can never make it jump.
-        local dragging = false
-        local moved = false
+        --   plain click opens the card instead.  Movement is read from three
+        --   sources because executors fill them inconsistently: InputObject
+        --   Delta, the absolute position, and the polled mouse location.
+        local DRAG_THRESHOLD = 5
+
+        local pressInput = nil
+        local pressAt = 0
+        local lastPointer = Vector2.zero
+        local lastPoll = Vector2.zero
+        local pollAvailable = false
+        local dragSource = nil
+        local pressMoved = false
         local dragOrigin = Vector2.zero
         local dragDelta = Vector2.zero
         local dragSpace = Vector2.zero
-        local touchStart = nil
-
-        local function pointerDelta(input, isTouch)
-            if isTouch then
-                return Vector2.new(input.Position.X, input.Position.Y) - touchStart
-            end
-
-            -- relative movement keeps working while the game has the mouse
-            -- locked to the middle of the screen; absolute positions do not
-            return dragDelta + Vector2.new(input.Delta.X, input.Delta.Y)
-        end
 
         local function beginDrag()
             -- absolute screen position -> gui-space offset, without moving
@@ -496515,43 +496786,86 @@ do
             syncPanel()
         end
 
+        local function applyMove(dx, dy)
+            dragDelta += Vector2.new(dx, dy)
+
+            if not pressMoved then
+                if dragDelta.Magnitude < DRAG_THRESHOLD then
+                    return
+                end
+
+                pressMoved = true
+                beginDrag()
+            end
+
+            moveDrag()
+        end
+
+        -- a press is finished exactly once, whether the end arrives as an
+        -- InputEnded, as a state change or from the held-button check
+        local function releasePress()
+            if not pressInput then
+                return
+            end
+
+            local wasDrag = pressMoved
+
+            pressInput = nil
+            dragSource = nil
+            pressMoved = false
+            island.BackgroundTransparency = 0.12
+
+            if wasDrag then
+                env.UE_ISLAND_POSITION = island.Position
+                config.island = {
+                    x = island.Position.X.Offset,
+                    y = island.Position.Y.Offset,
+                }
+                queueSave()
+            else
+                togglePanel()
+            end
+        end
+
         island.InputBegan:Connect(function(input)
             if input.UserInputType ~= Enum.UserInputType.MouseButton1
                 and input.UserInputType ~= Enum.UserInputType.Touch then
                 return
             end
 
-            dragging = true
-            moved = false
-            touchStart = Vector2.new(input.Position.X, input.Position.Y)
-
-            local connection
-            connection = input.Changed:Connect(function()
-                if input.UserInputState ~= Enum.UserInputState.End then
+            -- one press at a time: a duplicated event must not toggle twice.
+            -- A press that never reported its release is dropped instead of
+            -- blocking the island for the rest of the session.
+            if pressInput then
+                if os.clock() - pressAt < 0.5 then
                     return
                 end
 
-                dragging = false
+                pressInput = nil
+                dragSource = nil
+                pressMoved = false
+                dragDelta = Vector2.zero
+            end
 
-                if connection then
-                    connection:Disconnect()
-                end
+            pressAt = os.clock()
+            pressInput = input
+            lastPointer = Vector2.new(input.Position.X, input.Position.Y)
+            pressMoved = false
+            dragSource = nil
+            dragDelta = Vector2.zero
 
-                if moved then
-                    env.UE_ISLAND_POSITION = island.Position
-                    config.island = {
-                        x = island.Position.X.Offset,
-                        y = island.Position.Y.Offset,
-                    }
-                    queueSave()
-                else
-                    togglePanel()
-                end
+            island.BackgroundTransparency = 0.04
+
+            local okLocation, location = pcall(function()
+                return UserInputService:GetMouseLocation()
             end)
+
+            pollAvailable = okLocation and typeof(location) == 'Vector2'
+            lastPoll = pollAvailable and Vector2.new(location.X, location.Y) or lastPointer
         end)
 
         UserInputService.InputChanged:Connect(function(input)
-            if not dragging then
+            if not pressInput or dragSource == 'poll' then
                 return
             end
 
@@ -496561,18 +496875,84 @@ do
                 return
             end
 
-            dragDelta = pointerDelta(input, isTouch)
-
-            if not moved then
-                if dragDelta.Magnitude < 5 then
-                    return
-                end
-
-                moved = true
-                beginDrag()
+            local delta = input.Delta
+            if not isTouch and delta and (delta.X ~= 0 or delta.Y ~= 0) then
+                dragSource = dragSource or 'delta'
+                applyMove(delta.X, delta.Y)
+                return
             end
 
-            moveDrag()
+            local position = input.Position
+            local nextPointer = Vector2.new(position.X, position.Y)
+            local step = nextPointer - lastPointer
+            lastPointer = nextPointer
+
+            if step.Magnitude > 0 then
+                dragSource = dragSource or 'absolute'
+                applyMove(step.X, step.Y)
+            end
+        end)
+
+        -- fallback for a mouse that reports no Delta and no moving position:
+        -- poll the location instead, and let it own the drag once it moves
+        RunService.RenderStepped:Connect(function()
+            if not pressInput or dragSource or not pollAvailable then
+                return
+            end
+
+            if pressInput.UserInputType ~= Enum.UserInputType.MouseButton1 then
+                return
+            end
+
+            local okLocation, location = pcall(function()
+                return UserInputService:GetMouseLocation()
+            end)
+
+            if not okLocation or typeof(location) ~= 'Vector2' then
+                pollAvailable = false
+                return
+            end
+
+            local now = Vector2.new(location.X, location.Y)
+            local step = now - lastPoll
+            lastPoll = now
+
+            if step.Magnitude > 0 then
+                dragSource = 'poll'
+                applyMove(step.X, step.Y)
+            end
+        end)
+
+        UserInputService.InputEnded:Connect(function(input)
+            if not pressInput then
+                return
+            end
+
+            if input.UserInputType ~= pressInput.UserInputType then
+                return
+            end
+
+            releasePress()
+        end)
+
+        -- if the release is ever swallowed, notice the button is no longer
+        -- held rather than leaving the island stuck in drag mode
+        RunService.Heartbeat:Connect(function()
+            if not pressInput then
+                return
+            end
+
+            if pressInput.UserInputType ~= Enum.UserInputType.MouseButton1 then
+                return
+            end
+
+            local okPressed, pressed = pcall(function()
+                return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+            end)
+
+            if okPressed and pressed == false then
+                releasePress()
+            end
         end)
 
         -- fps ------------------------------------------------------------
